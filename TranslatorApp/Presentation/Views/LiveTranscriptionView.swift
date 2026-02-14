@@ -124,6 +124,7 @@ struct LiveTranscriptionView: View {
                     Text(text.isEmpty ? "Esperando audio..." : text)
                         .font(.system(size: fontSise, weight: .medium, design: .monospaced))
                         .foregroundStyle(color)
+                        .animation(.easeInOut(duration: 0.2), value: text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                     
