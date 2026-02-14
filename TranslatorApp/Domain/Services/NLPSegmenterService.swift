@@ -15,7 +15,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
     
     //  Delay optimizado para permitir que el ASR "estabilice" las palabras anteriores
-    private let baseStabilityDelay: UInt64 = 1_200_000_000 // 1.2s
+    private let baseStabilityDelay: UInt64 = 1_400_000_000 // 1.6s
     private let qualityMetrics: QualityMetricsService
     
     //  Guardamos el texto procesado para comparación de longitud y contenido

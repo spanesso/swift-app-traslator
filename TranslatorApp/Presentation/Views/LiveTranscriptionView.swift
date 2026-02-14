@@ -31,7 +31,7 @@ struct LiveTranscriptionView: View {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "ORIGINAL (EN)", icon: "microphone.fill", color: .yellow)
-                        scrollableTextView(text: viewModel.currentBuffer, id: "raw_end")
+                        scrollableTextView(text: viewModel.currentBuffer, id: "raw_end", color: .green, fontSise: 12)
                     }
                     .frame(width: totalWidth * 0.35)
                     .padding(.top)
@@ -117,12 +117,12 @@ struct LiveTranscriptionView: View {
         .foregroundStyle(.secondary)
     }
     
-    private func scrollableTextView(text: String, id: String, color: Color = .white) -> some View {
+    private func scrollableTextView(text: String, id: String, color: Color = .white , fontSise: CGFloat = 16) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(text.isEmpty ? "Esperando audio..." : text)
-                        .font(.system(size: 16, weight: .medium, design: .monospaced))
+                        .font(.system(size: fontSise, weight: .medium, design: .monospaced))
                         .foregroundStyle(color)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
@@ -139,22 +139,6 @@ struct LiveTranscriptionView: View {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
             }
-        }
-    }
-    
-    private func translatorStateText() -> String {
-        switch viewModel.translatorState {
-        case .idle: return "IDLE"
-        case .inFlight: return "IN FLIGHT"
-        case .error: return "ERROR"
-        }
-    }
-    
-    private func translatorStateColor() -> Color {
-        switch viewModel.translatorState {
-        case .idle: return .green
-        case .inFlight: return .orange
-        case .error: return .red
         }
     }
 }
