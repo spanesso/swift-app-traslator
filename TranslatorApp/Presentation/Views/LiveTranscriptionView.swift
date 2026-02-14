@@ -15,8 +15,6 @@ struct LiveTranscriptionView: View {
     
     private let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
     
-    @State private var showDebugInfo: Bool = false
-    
     init(viewModel: TranscriptionViewModel) {
         self.viewModel = viewModel
     }
@@ -44,10 +42,6 @@ struct LiveTranscriptionView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "OFFLINE TRANSLATION (ES)", icon: "character.bubble.fill", color: .blue)
                         scrollableTextView(text: viewModel.translatedBuffer, id: "tr_end", color: .cyan)
-                        
-                        if showDebugInfo {
-                            debugInfoPanel()
-                        }
                     }
                     .frame(width: totalWidth * 0.60)
                     .padding(.top)
@@ -61,15 +55,6 @@ struct LiveTranscriptionView: View {
             .ignoresSafeArea(edges: .bottom)
             
             VStack(spacing: 12) {
-                Button(action: { showDebugInfo.toggle() }) {
-                    Image(systemName: showDebugInfo ? "eye.slash.fill" : "eye.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(Color.purple.opacity(0.8))
-                        .clipShape(Circle())
-                        .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 2)
-                }
                 
                 RecordButton(isRecording: viewModel.isRecording) {
                     viewModel.toggleRecording()
@@ -79,7 +64,7 @@ struct LiveTranscriptionView: View {
             .padding(.trailing, 5)
         }
         .alert("Audio Engine Error", isPresented: $bindable.hasError) {
-            Button("Entendido", role: .cancel) { }
+            Button("Ok", role: .cancel) { }
         } message: {
             if let error = viewModel.errorMessage {
                 Text(error)
@@ -142,44 +127,19 @@ struct LiveTranscriptionView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                     
-                    // /CAMBIO/ Elemento invisible que sirve de ancla para el scroll
+                    //  Elemento invisible que sirve de ancla para el scroll
                     Color.clear
                         .frame(height: 1)
                         .id(id)
                 }
             }
             .onChange(of: text) { _, _ in
-                // /CAMBIO/ Forzamos el scroll al ancla invisible cada vez que el texto cambia
+                //  Forzamos el scroll al ancla invisible cada vez que el texto cambia
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
             }
         }
-    }
-    
-    // /CAMBIO/ Panel de información DEBUG
-    private func debugInfoPanel() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("DEBUG INFO")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.orange)
-            
-            Divider()
-            
-            HStack {
-                Text("Translator State:")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                
-                Text(translatorStateText())
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(translatorStateColor())
-            }
-        }
-        .padding(8)
-        .background(Color(white: 0.15))
-        .cornerRadius(8)
-        .padding(.horizontal)
     }
     
     private func translatorStateText() -> String {
