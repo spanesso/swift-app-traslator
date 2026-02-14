@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict/>
+	</array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Necesitamos acceso al micrófono para transcribir tu voz en tiempo real y poder traducirla.</string>
+
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Utilizamos el reconocimiento de voz de Apple para convertir tus palabras en texto localmente.</string>
+</dict>
+</plist>
