@@ -18,14 +18,14 @@ final class DependencyContainer {
     // 2. Domain Layer (Servicios de lógica de negocio)
     private let nlpSegmenter: NLPSegmenterServiceProtocol
     
-    // /CAMBIO/ 3. Quality Metrics Service
+    //  3. Quality Metrics Service
     private let qualityMetrics: QualityMetricsService
     
     // 3. Use Cases (Orquestadores)
     private let transcribeUseCase: TranscribeAudioUseCase
     
     init() {
-        // /CAMBIO/ Inicializamos el servicio de métricas de calidad
+        //  Inicializamos el servicio de métricas de calidad
         self.qualityMetrics = QualityMetricsService()
         
         // Inicializamos el motor de escucha (Actor) con métricas
@@ -35,10 +35,10 @@ final class DependencyContainer {
         // Inicializamos el repositorio (Adaptador)
         self.speechRepository = SpeechRepository(listener: listener)
         
-        // /CAMBIO/ Inyectamos el servicio de métricas en el segmentador
+        //  Inyectamos el servicio de métricas en el segmentador
         self.nlpSegmenter = NLPSegmenterService(qualityMetrics: qualityMetrics)
         
-        // /CAMBIO/ Inyectamos métricas en el Use Case
+        //  Inyectamos métricas en el Use Case
         self.transcribeUseCase = TranscribeAudioUseCase(
             repository: speechRepository,
             segmenter: nlpSegmenter,

@@ -14,11 +14,11 @@ import CryptoKit
 final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
     
-    // /CAMBIO/ Delay optimizado para permitir que el ASR "estabilice" las palabras anteriores
+    //  Delay optimizado para permitir que el ASR "estabilice" las palabras anteriores
     private let baseStabilityDelay: UInt64 = 1_200_000_000 // 1.2s
     private let qualityMetrics: QualityMetricsService
     
-    // /CAMBIO/ Guardamos el texto procesado para comparación de longitud y contenido
+    //  Guardamos el texto procesado para comparación de longitud y contenido
     private var lastEmittedFullText: String = ""
     
     init(qualityMetrics: QualityMetricsService) {
@@ -38,7 +38,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                     
                     stabilityTimer?.cancel()
                     
-                    // /CAMBIO/ Si el texto actual es más corto o igual en longitud al último emitido,
+                    //  Si el texto actual es más corto o igual en longitud al último emitido,
                     // significa que el ASR está corrigiendo o no hay nada nuevo real.
                     if currentFullText.count <= lastEmittedFullText.count {
                         continue
@@ -57,7 +57,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     }
 
     private func processDifferentialText(_ newFullText: String, to continuation: AsyncStream<String>.Continuation) async {
-        // /CAMBIO/ Lógica de recorte de seguridad.
+        //  Lógica de recorte de seguridad.
         // Si el texto nuevo empieza igual que el viejo, solo tomamos lo que sobra.
         var delta = ""
         
@@ -72,7 +72,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = trimmedDelta.components(separatedBy: .whitespaces)
         
-        // /CAMBIO/ Solo emitimos si hay una "frase" sustancial (mínimo 5 palabras)
+        //  Solo emitimos si hay una "frase" sustancial (mínimo 5 palabras)
         // para evitar micro-traducciones sin contexto.
         if words.count >= 5 || newFullText.hasSuffix(".") {
             logger.info("✨ [Segmenter] Delta Detected: \(trimmedDelta)")
@@ -81,7 +81,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         }
     }
     
-    // /CAMBIO/ Función auxiliar para encontrar realmente qué es lo nuevo
+    //  Función auxiliar para encontrar realmente qué es lo nuevo
     private func findActualNewContent(old: String, new: String) -> String {
         let oldWords = old.components(separatedBy: .whitespaces)
         let newWords = new.components(separatedBy: .whitespaces)

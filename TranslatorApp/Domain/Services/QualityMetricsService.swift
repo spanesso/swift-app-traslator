@@ -23,7 +23,7 @@ actor QualityMetricsService {
     private var sessionStartTime: Date?
     private var currentSessionId: String?
     
-    // /CAMBIO/ Límite de muestras en memoria
+    //  Límite de muestras en memoria
     private let maxSamples = 100
     
     func startSession(sessionId: String) {
@@ -85,14 +85,14 @@ actor QualityMetricsService {
         }
     }
     
-    // /CAMBIO/ Obtener snapshot de métricas
+    //  Obtener snapshot de métricas
     func getCurrentMetrics() -> QualitySnapshot {
         let avgStability = stabilityDelays.isEmpty ? 0.0 : stabilityDelays.reduce(0, +) / Double(stabilityDelays.count)
         let avgWPS = wordsPerSecondSamples.isEmpty ? 0.0 : wordsPerSecondSamples.reduce(0, +) / Double(wordsPerSecondSamples.count)
         let avgConfidence = confidenceScores.isEmpty ? 0.0 : confidenceScores.reduce(0, +) / Float(confidenceScores.count)
         let avgFragmentation = fragmentationScores.isEmpty ? 0.0 : fragmentationScores.reduce(0, +) / Double(fragmentationScores.count)
         
-        // /CAMBIO/ Calcular tasa de revisiones por minuto
+        //  Calcular tasa de revisiones por minuto
         let sessionDuration = sessionStartTime.map { Date().timeIntervalSince($0) } ?? 1.0
         let revisionsPerMinute = Double(totalRevisions) / (sessionDuration / 60.0)
         
@@ -106,7 +106,7 @@ actor QualityMetricsService {
         )
     }
     
-    // /CAMBIO/ Determinar si la calidad del habla es baja (para adaptar estrategia)
+    //  Determinar si la calidad del habla es baja (para adaptar estrategia)
     func isLowQualitySpeech() -> Bool {
         let metrics = getCurrentMetrics()
         

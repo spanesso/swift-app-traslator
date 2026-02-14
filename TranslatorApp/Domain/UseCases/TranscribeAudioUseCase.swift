@@ -12,10 +12,10 @@ final class TranscribeAudioUseCase {
     private let repository: SpeechRepositoryProtocol
     private let segmenter: NLPSegmenterServiceProtocol
     
-    // /CAMBIO/ Logger estructurado
+    //  Logger estructurado
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UseCase")
     
-    // /CAMBIO/ Inyección de métricas
+    //  Inyección de métricas
     private let qualityMetrics: QualityMetricsService
     
     init(
