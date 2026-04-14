@@ -37,7 +37,32 @@ final class TranscribeAudioUseCase {
         logger.info("🎯 [UseCase] Starting segmented transcription")
         return segmenter.processStream(stream)
     }
-    
+
+    /// Produce ambos streams a partir de una sola invocación al repository.
+    /// Un pump Task central fan-out cada segmento a dos continuations independientes
+    /// (AsyncStream es single-consumer; iterar el mismo stream en dos for-await
+    /// reparte los segmentos en orden impredecible).
+    func executeBoth() async throws -> (raw: AsyncStream<SpeechSegment>, segmented: AsyncStream<String>) {
+        logger.info("🎯 [UseCase] Starting dual-output transcription (fan-out)")
+        let sourceStream = try await repository.startTranscription()
+
+        let (rawOutput, rawCont) = AsyncStream.makeStream(of: SpeechSegment.self)
+        let (segInput, segCont) = AsyncStream.makeStream(of: SpeechSegment.self)
+
+        Task.detached { [logger] in
+            for await segment in sourceStream {
+                rawCont.yield(segment)
+                segCont.yield(segment)
+            }
+            logger.info("🔚 [UseCase] Source stream ended — finishing fan-out")
+            rawCont.finish()
+            segCont.finish()
+        }
+
+        let segmentedOutput = segmenter.processStream(segInput)
+        return (rawOutput, segmentedOutput)
+    }
+
     func stop() async {
         logger.info("🛑 [UseCase] Stopping transcription")
         await repository.stopTranscription()

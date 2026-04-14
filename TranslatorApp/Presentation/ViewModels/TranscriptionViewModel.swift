@@ -26,8 +26,10 @@ final class TranscriptionViewModel {
     private var translationContinuation: AsyncStream<String>.Continuation?
     private var transcriptionTask: Task<Void, Never>?
     
-    private var translatedSentences: [String] = []
+    var translatedSentences: [String] = []
+    var emittedPhrases: [String] = []
     private let maxTranslatedSentences = 30
+    private let maxEmittedPhrases = 50
 
     init(transcribeUseCase: TranscribeAudioUseCase) {
         self.transcribeUseCase = transcribeUseCase
@@ -39,32 +41,36 @@ final class TranscriptionViewModel {
     
     private func startRecording() {
         self.translatedSentences.removeAll()
+        self.emittedPhrases.removeAll()
         self.translatedBuffer = ""
         self.currentBuffer = ""
         self.isRecording = true
-        
+
         let (stream, continuation) = AsyncStream.makeStream(of: String.self)
         self.translationRequests = stream
         self.translationContinuation = continuation
-        
+
         transcriptionTask = Task {
             do {
-                let rawStream = try await transcribeUseCase.executeRaw()
-                
-                // Tarea 1: Update de UI del texto original (EN)
-                let uiTask = Task {
+                let (rawStream, stableStream) = try await transcribeUseCase.executeBoth()
+
+                // Tarea 1: Update de UI del texto original (EN) — consume rawStream
+                let uiTask = Task { @MainActor in
                     for await segment in rawStream {
                         self.currentBuffer = segment.text
                     }
                 }
-                
-                // Tarea 2: Procesar segmentación y enviar al canal de traducción
-                let stableStream = transcribeUseCase.executeSegmented(from: rawStream)
+
+                // Tarea 2: Consumir frases estables del segmenter y enviarlas al motor de traducción
                 for await sentence in stableStream {
                     self.translatorState = .inFlight
                     self.translationContinuation?.yield(sentence)
+                    self.emittedPhrases.append(sentence)
+                    if self.emittedPhrases.count > self.maxEmittedPhrases {
+                        self.emittedPhrases.removeFirst()
+                    }
                 }
-                
+
                 uiTask.cancel()
             } catch {
                 self.errorMessage = error.localizedDescription

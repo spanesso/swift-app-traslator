@@ -30,33 +30,40 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
             Task {
                 let sessionId = UUID().uuidString
                 await qualityMetrics.startSession(sessionId: sessionId)
-                
+
                 var stabilityTimer: Task<Void, Never>?
-                
+                var lastSeenText: String = ""
+
                 for await segment in stream {
                     let currentFullText = segment.text
-                    
+
                     stabilityTimer?.cancel()
-                    
-                    //  Si el texto actual es más corto o igual en longitud al último emitido,
-                    // significa que el ASR está corrigiendo o no hay nada nuevo real.
-                    if currentFullText.count <= lastEmittedFullText.count {
+
+                    if currentFullText == lastEmittedFullText {
                         continue
                     }
-                    
+
+                    lastSeenText = currentFullText
+                    let segmentIsFinal = segment.isFinal
+
                     stabilityTimer = Task {
                         try? await Task.sleep(nanoseconds: baseStabilityDelay)
                         guard !Task.isCancelled else { return }
-                        
-                        await processDifferentialText(currentFullText, to: continuation)
+
+                        await processDifferentialText(currentFullText, isFinal: segmentIsFinal, to: continuation)
                     }
+                }
+
+                stabilityTimer?.cancel()
+                if !lastSeenText.isEmpty && lastSeenText != lastEmittedFullText {
+                    await processDifferentialText(lastSeenText, isFinal: true, to: continuation)
                 }
                 continuation.finish()
             }
         }
     }
 
-    private func processDifferentialText(_ newFullText: String, to continuation: AsyncStream<String>.Continuation) async {
+    private func processDifferentialText(_ newFullText: String, isFinal: Bool, to continuation: AsyncStream<String>.Continuation) async {
         //  Lógica de recorte de seguridad.
         // Si el texto nuevo empieza igual que el viejo, solo tomamos lo que sobra.
         var delta = ""
@@ -72,10 +79,12 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = trimmedDelta.components(separatedBy: .whitespaces)
         
-        //  Solo emitimos si hay una "frase" sustancial (mínimo 5 palabras)
-        // para evitar micro-traducciones sin contexto.
-        if words.count >= 5 || newFullText.hasSuffix(".") {
-            logger.info("✨ [Segmenter] Delta Detected: \(trimmedDelta)")
+        let endsWithTerminator = newFullText.hasSuffix(".") || newFullText.hasSuffix("?") || newFullText.hasSuffix("!")
+        let finalShortPhrase = isFinal && words.count >= 2
+
+        if words.count >= 5 || endsWithTerminator || finalShortPhrase {
+            guard !trimmedDelta.isEmpty else { return }
+            logger.info("✨ [Segmenter] Delta Detected (isFinal=\(isFinal)): \(trimmedDelta)")
             lastEmittedFullText = newFullText
             continuation.yield(trimmedDelta)
         }
