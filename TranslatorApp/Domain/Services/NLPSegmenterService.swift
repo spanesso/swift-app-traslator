@@ -8,96 +8,191 @@
 import Foundation
 import NaturalLanguage
 import OSLog
-import CryptoKit
- 
+
 
 final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
-    
-    //  Delay optimizado para permitir que el ASR "estabilice" las palabras anteriores
-    private let baseStabilityDelay: UInt64 = 1_400_000_000 // 1.6s
+
+    // Respaldo corto cuando no hay límite gramatical — solo para cláusulas abiertas
+    private let stabilityDelay: UInt64 = 700_000_000 // 0.7s
+    // Si una cláusula sin terminador supera este número de palabras, forzamos corte por cláusula
+    private let longSentenceWordThreshold = 15
+    // Mínimo para evitar micro-frases (una palabra aislada no se traduce)
+    private let minShortPhraseWords = 2
+
     private let qualityMetrics: QualityMetricsService
-    
-    //  Guardamos el texto procesado para comparación de longitud y contenido
-    private var lastEmittedFullText: String = ""
-    
+
+    // Estado por sesión — reinicializado al comienzo de processStream
+    private var committedFullText: String = ""
+    private var lastSeenFullText: String = ""
+
     init(qualityMetrics: QualityMetricsService) {
         self.qualityMetrics = qualityMetrics
     }
-    
+
     func processStream(_ stream: AsyncStream<SpeechSegment>) -> AsyncStream<String> {
         return AsyncStream { continuation in
             Task {
                 let sessionId = UUID().uuidString
                 await qualityMetrics.startSession(sessionId: sessionId)
 
+                // Reset por sesión
+                self.committedFullText = ""
+                self.lastSeenFullText = ""
+
                 var stabilityTimer: Task<Void, Never>?
-                var lastSeenText: String = ""
 
                 for await segment in stream {
-                    let currentFullText = segment.text
-
                     stabilityTimer?.cancel()
 
-                    if currentFullText == lastEmittedFullText {
+                    let fullText = segment.text
+                    if fullText == self.lastSeenFullText { continue }
+                    self.lastSeenFullText = fullText
+
+                    let pending = self.pendingSuffix(of: fullText)
+                    guard !pending.isEmpty else { continue }
+
+                    // 1. Emitir oraciones completas detectadas por NLTokenizer
+                    let sentences = self.splitIntoSentences(pending)
+                    if sentences.count >= 2 {
+                        for completed in sentences.dropLast() {
+                            self.emitIfViable(completed, continuation: continuation, tag: "sentence")
+                        }
+                    }
+
+                    // Recalcular lo pendiente tras las emisiones anteriores
+                    let tail = self.pendingSuffix(of: fullText)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !tail.isEmpty else { continue }
+
+                    // 2a. Terminador de oración (.!?) o isFinal del ASR → emitir ya
+                    if self.endsWithTerminator(tail) || segment.isFinal {
+                        let tag = segment.isFinal ? "final" : "terminator"
+                        self.emitIfViable(tail, continuation: continuation, tag: tag)
                         continue
                     }
 
-                    lastSeenText = currentFullText
-                    let segmentIsFinal = segment.isFinal
+                    // 2b. Cláusula larga sin terminador → cortar en marcador gramatical
+                    if self.wordCount(of: tail) > self.longSentenceWordThreshold,
+                       let cut = self.cutAtLastClauseMarker(tail) {
+                        let head = cut.head.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if self.wordCount(of: head) >= self.minShortPhraseWords {
+                            self.emitIfViable(head, continuation: continuation, tag: "clause")
+                            continue
+                        }
+                    }
 
-                    stabilityTimer = Task {
-                        try? await Task.sleep(nanoseconds: baseStabilityDelay)
-                        guard !Task.isCancelled else { return }
-
-                        await processDifferentialText(currentFullText, isFinal: segmentIsFinal, to: continuation)
+                    // 2c. Respaldo por silencio — timer corto
+                    let capturedTail = tail
+                    stabilityTimer = Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: self?.stabilityDelay ?? 700_000_000)
+                        guard !Task.isCancelled, let self = self else { return }
+                        let currentTail = self.pendingSuffix(of: self.lastSeenFullText)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard currentTail == capturedTail else { return }
+                        self.emitIfViable(capturedTail, continuation: continuation, tag: "stability")
                     }
                 }
 
+                // Stream terminado — flush de lo que quede
                 stabilityTimer?.cancel()
-                if !lastSeenText.isEmpty && lastSeenText != lastEmittedFullText {
-                    await processDifferentialText(lastSeenText, isFinal: true, to: continuation)
+                let trailing = self.pendingSuffix(of: self.lastSeenFullText)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trailing.isEmpty {
+                    self.emitIfViable(trailing, continuation: continuation, tag: "flush", forceEmit: true)
                 }
                 continuation.finish()
             }
         }
     }
 
-    private func processDifferentialText(_ newFullText: String, isFinal: Bool, to continuation: AsyncStream<String>.Continuation) async {
-        //  Lógica de recorte de seguridad.
-        // Si el texto nuevo empieza igual que el viejo, solo tomamos lo que sobra.
-        var delta = ""
-        
-        if newFullText.hasPrefix(lastEmittedFullText) {
-            delta = String(newFullText.dropFirst(lastEmittedFullText.count))
-        } else {
-            // Si el ASR cambió algo al inicio, buscamos el punto de divergencia
-            // para no repetir párrafos enteros.
-            delta = findActualNewContent(old: lastEmittedFullText, new: newFullText)
-        }
-        
-        let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = trimmedDelta.components(separatedBy: .whitespaces)
-        
-        let endsWithTerminator = newFullText.hasSuffix(".") || newFullText.hasSuffix("?") || newFullText.hasSuffix("!")
-        let finalShortPhrase = isFinal && words.count >= 2
+    // MARK: - Emisión
 
-        if words.count >= 5 || endsWithTerminator || finalShortPhrase {
-            guard !trimmedDelta.isEmpty else { return }
-            logger.info("✨ [Segmenter] Delta Detected (isFinal=\(isFinal)): \(trimmedDelta)")
-            lastEmittedFullText = newFullText
-            continuation.yield(trimmedDelta)
+    private func emitIfViable(_ rawText: String,
+                              continuation: AsyncStream<String>.Continuation,
+                              tag: String,
+                              forceEmit: Bool = false) {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let words = self.wordCount(of: trimmed)
+        guard forceEmit || words >= self.minShortPhraseWords else { return }
+
+        commit(trimmed)
+        logger.info("✨ [Segmenter/\(tag)] \(trimmed)")
+        continuation.yield(trimmed)
+    }
+
+    private func commit(_ text: String) {
+        if committedFullText.isEmpty {
+            committedFullText = text
+        } else {
+            committedFullText += " " + text
         }
     }
-    
-    //  Función auxiliar para encontrar realmente qué es lo nuevo
-    private func findActualNewContent(old: String, new: String) -> String {
-        let oldWords = old.components(separatedBy: .whitespaces)
-        let newWords = new.components(separatedBy: .whitespaces)
-        
-        if newWords.count > oldWords.count {
-            return newWords.dropFirst(oldWords.count).joined(separator: " ")
+
+    // MARK: - Helpers de texto
+
+    private func pendingSuffix(of fullText: String) -> String {
+        // Diferencial basado en conteo de palabras: omite las N primeras palabras
+        // ya comprometidas. Tolera pequeñas correcciones del ASR que no alteran
+        // el conteo total.
+        let committedWords = committedFullText.split(whereSeparator: { $0.isWhitespace })
+        let fullWords = fullText.split(whereSeparator: { $0.isWhitespace })
+        guard fullWords.count > committedWords.count else { return "" }
+        return fullWords.suffix(from: committedWords.count).joined(separator: " ")
+    }
+
+    private func wordCount(of text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace }).count
+    }
+
+    private func endsWithTerminator(_ text: String) -> Bool {
+        guard let last = text.last else { return false }
+        return ".!?".contains(last)
+    }
+
+    private func splitIntoSentences(_ text: String) -> [String] {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var result: [String] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let piece = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !piece.isEmpty { result.append(piece) }
+            return true
         }
-        return ""
+        return result
+    }
+
+    /// Corta en el último marcador gramatical disponible.
+    /// Prioridad: puntuación (`,;:—`) > conectores discursivos (`and`, `but`, `so`, `because`, `however`).
+    /// El `head` se emite como cláusula completa; el `tail` restante espera al siguiente update.
+    private func cutAtLastClauseMarker(_ text: String) -> (head: String, tail: String)? {
+        var bestCutPosition: String.Index?
+
+        // Puntuación: el marcador se incluye en el head (queda natural para traducir)
+        for p in [",", ";", ":", "—"] {
+            if let r = text.range(of: p, options: .backwards) {
+                let pos = r.upperBound
+                if bestCutPosition == nil || pos > bestCutPosition! {
+                    bestCutPosition = pos
+                }
+            }
+        }
+
+        // Conectores discursivos: el conector se queda con el tail (encabeza la siguiente frase)
+        let connectors = [" and ", " but ", " so ", " because ", " however ", " yet ", " although "]
+        for conn in connectors {
+            if let r = text.range(of: conn, options: .backwards) {
+                let pos = r.lowerBound
+                if bestCutPosition == nil || pos > bestCutPosition! {
+                    bestCutPosition = pos
+                }
+            }
+        }
+
+        guard let cut = bestCutPosition else { return nil }
+        let head = String(text[text.startIndex..<cut])
+        let tail = String(text[cut...])
+        return (head, tail)
     }
 }
