@@ -19,11 +19,14 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let longSentenceWordThreshold = 15
     // Mínimo para evitar micro-frases (una palabra aislada no se traduce)
     private let minShortPhraseWords = 2
+    // Máximo tiempo de retención al parar la grabación (T008) — default: 5.0s
+    var maxFlushDelay: TimeInterval = 5.0
 
     private let qualityMetrics: QualityMetricsService
 
     // Estado por sesión — reinicializado al comienzo de processStream
-    private var committedFullText: String = ""
+    // T005: private(set) exposes committedFullText for tail computation in ViewModel
+    private(set) var committedFullText: String = ""
     private var lastSeenFullText: String = ""
 
     init(qualityMetrics: QualityMetricsService) {
@@ -118,7 +121,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         guard forceEmit || words >= self.minShortPhraseWords else { return }
 
         commit(trimmed)
-        logger.info("✨ [Segmenter/\(tag)] \(trimmed)")
+        logger.info("✨ [Segmenter/\(tag)] words=\(words) | \(trimmed)")
         continuation.yield(trimmed)
     }
 
@@ -133,13 +136,14 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     // MARK: - Helpers de texto
 
     private func pendingSuffix(of fullText: String) -> String {
-        // Diferencial basado en conteo de palabras: omite las N primeras palabras
-        // ya comprometidas. Tolera pequeñas correcciones del ASR que no alteran
-        // el conteo total.
-        let committedWords = committedFullText.split(whereSeparator: { $0.isWhitespace })
-        let fullWords = fullText.split(whereSeparator: { $0.isWhitespace })
-        guard fullWords.count > committedWords.count else { return "" }
-        return fullWords.suffix(from: committedWords.count).joined(separator: " ")
+        // String-prefix stripping: immune to ASR word-count drift from corrections.
+        // Falls back to full text if committed prefix is no longer present (e.g. heavy revision).
+        let normalized = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let committed = committedFullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !committed.isEmpty else { return normalized }
+        guard normalized.hasPrefix(committed) else { return normalized }
+        return String(normalized.dropFirst(committed.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func wordCount(of text: String) -> Int {

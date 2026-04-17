@@ -13,35 +13,41 @@ import OSLog
 final class TranscriptionViewModel {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "ViewModel")
     private let transcribeUseCase: TranscribeAudioUseCase
-    
+
     var currentBuffer: String = ""
     var translatedBuffer: String = ""
     var isRecording: Bool = false
     var hasError: Bool = false
     var errorMessage: String?
     var translatorState: TranslatorState = .idle
-    
-    // /CAMBIO/ Manejo de streams simplificado para evitar fugas de memoria
+
     var translationRequests: AsyncStream<String>?
     private var translationContinuation: AsyncStream<String>.Continuation?
     private var transcriptionTask: Task<Void, Never>?
-    
+
     var translatedSentences: [String] = []
     var emittedPhrases: [String] = []
+    // T006: O(1) duplicate guard for emittedPhrases
+    private var emittedPhraseSet: Set<String> = []
+    // T011: context window for context-aware translation
+    private var translationContext = TranslationContextWindow()
+
     private let maxTranslatedSentences = 30
     private let maxEmittedPhrases = 50
 
     init(transcribeUseCase: TranscribeAudioUseCase) {
         self.transcribeUseCase = transcribeUseCase
     }
-    
+
     func toggleRecording() {
         isRecording ? stopRecording() : startRecording()
     }
-    
+
     private func startRecording() {
         self.translatedSentences.removeAll()
         self.emittedPhrases.removeAll()
+        self.emittedPhraseSet.removeAll()       // T006: reset per session
+        self.translationContext = TranslationContextWindow()  // T011: reset per session
         self.translatedBuffer = ""
         self.currentBuffer = ""
         self.isRecording = true
@@ -54,20 +60,34 @@ final class TranscriptionViewModel {
             do {
                 let (rawStream, stableStream) = try await transcribeUseCase.executeBoth()
 
-                // Tarea 1: Update de UI del texto original (EN) — consume rawStream
+                // Task 1: Update original column — show only uncommitted tail (T007)
                 let uiTask = Task { @MainActor in
                     for await segment in rawStream {
-                        self.currentBuffer = segment.text
+                        // Compute committed prefix from already-emitted phrases
+                        let committedText = self.emittedPhrases.joined(separator: " ")
+                            .trimmingCharacters(in: .whitespaces)
+                        let fullText = segment.text.trimmingCharacters(in: .whitespaces)
+                        if !committedText.isEmpty, fullText.hasPrefix(committedText) {
+                            let tail = String(fullText.dropFirst(committedText.count))
+                                .trimmingCharacters(in: .whitespaces)
+                            self.currentBuffer = tail
+                        } else {
+                            self.currentBuffer = fullText
+                        }
                     }
                 }
 
-                // Tarea 2: Consumir frases estables del segmenter y enviarlas al motor de traducción
+                // Task 2: Stable phrases → translation engine with context injection (T014)
                 for await sentence in stableStream {
                     self.translatorState = .inFlight
-                    self.translationContinuation?.yield(sentence)
-                    self.emittedPhrases.append(sentence)
-                    if self.emittedPhrases.count > self.maxEmittedPhrases {
-                        self.emittedPhrases.removeFirst()
+                    // T014: yield request with context block prepended
+                    self.translationContinuation?.yield(self.translationContext.requestText(for: sentence))
+                    // T006: deduplicate before appending to emittedPhrases
+                    if self.emittedPhraseSet.insert(sentence).inserted {
+                        self.emittedPhrases.append(sentence)
+                        if self.emittedPhrases.count > self.maxEmittedPhrases {
+                            self.emittedPhrases.removeFirst()
+                        }
                     }
                 }
 
@@ -79,7 +99,7 @@ final class TranscriptionViewModel {
             }
         }
     }
-    
+
     func stopRecording() {
         isRecording = false
         translatorState = .idle
@@ -87,26 +107,31 @@ final class TranscriptionViewModel {
         transcriptionTask?.cancel()
         Task { await transcribeUseCase.stop() }
     }
-    
+
+    // T012: originalSentence added so context window can record the (original, translated) pair
     @MainActor
-    func appendTranslation(_ translation: String) {
+    func appendTranslation(_ translation: String, originalSentence: String) {
+        // T017: whitespace guard
         let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        
-        // /CAMBIO/ Evitar duplicados exactos o contenidos
-        if let last = translatedSentences.last, (last == trimmed || trimmed.contains(last)) {
+
+        // T016: full-array dedup — exact match, new is subset of old, old is subset of new
+        guard !translatedSentences.contains(where: {
+            $0 == trimmed || trimmed.contains($0) || $0.contains(trimmed)
+        }) else {
             self.translatorState = .idle
             return
         }
-        
+
         logger.info("✅ [ViewModel] Unique Translation Added: \(trimmed)")
+        // T012: record pair in context window for future requests
+        translationContext.append(original: originalSentence, translated: trimmed)
         translatedSentences.append(trimmed)
-        
+
         if translatedSentences.count > maxTranslatedSentences {
             translatedSentences.removeFirst()
         }
-        
-        // /CAMBIO/ El buffer se actualiza, lo que disparará el scroll en la View
+
         self.translatedBuffer = translatedSentences.joined(separator: "\n\n")
         self.translatorState = .idle
     }

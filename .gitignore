@@ -1,0 +1,33 @@
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+*.swiftpm/
+Packages/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Xcode Signing
+*.cer
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.tmp
+
+# Logs
+*.log

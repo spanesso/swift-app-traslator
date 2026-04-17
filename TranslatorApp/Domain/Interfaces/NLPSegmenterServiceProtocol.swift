@@ -7,5 +7,6 @@
 
 protocol NLPSegmenterServiceProtocol {
     func processStream(_ stream: AsyncStream<SpeechSegment>) -> AsyncStream<String>
+    var committedFullText: String { get }
 }
 

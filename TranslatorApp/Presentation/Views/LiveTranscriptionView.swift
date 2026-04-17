@@ -73,19 +73,29 @@ struct LiveTranscriptionView: View {
         .translationTask(translationConfig) { session in
             // Esperamos a que el ViewModel tenga el stream listo
             guard let requests = viewModel.translationRequests else { return }
-            
+
             viewLogger.info("🚀 [UI] Translation engine active and listening")
-            
+
             for await text in requests {
                 do {
-                    // Filtro de seguridad para no saturar con micro-frases
-                    guard text.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
-                    
+                    // T013: extract actual sentence from request (strips "[Context: ...]\n\n" prefix)
+                    let sentence = text.components(separatedBy: "\n\n").last ?? text
+                    guard sentence.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
+
                     let response = try await session.translate(text)
-                    
+
+                    // T015: strip any leaked "[Context: ...]" block from translation response
+                    var translated = response.targetText
+                    if translated.hasPrefix("[") {
+                        if let doubleNewline = translated.range(of: "\n\n") {
+                            translated = String(translated[doubleNewline.upperBound...])
+                        }
+                    }
+                    translated = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+
                     await MainActor.run {
-                        viewModel.appendTranslation(response.targetText)
-                        viewLogger.info("✅ [UI] Translation displayed")
+                        viewModel.appendTranslation(translated, originalSentence: sentence)
+                        viewLogger.info("✅ [UI] Translation displayed: \(translated)")
                     }
                 } catch {
                     viewLogger.error("❌ [UI] Translation engine error: \(error.localizedDescription)")
