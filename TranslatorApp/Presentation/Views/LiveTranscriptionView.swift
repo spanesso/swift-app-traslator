@@ -12,22 +12,22 @@ import OSLog
 struct LiveTranscriptionView: View {
     var viewModel: TranscriptionViewModel
     @State private var translationConfig: TranslationSession.Configuration?
-    
+
     private let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
-    
+
     init(viewModel: TranscriptionViewModel) {
         self.viewModel = viewModel
     }
-    
+
     @State private var taskID = UUID()
-    
+
     var body: some View {
         @Bindable var bindable = viewModel
-        
+
         ZStack(alignment: .topTrailing) {
             GeometryReader { geometry in
                 let totalWidth = geometry.size.width
-                
+
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "ORIGINAL (EN)", icon: "microphone.fill", color: .yellow)
@@ -46,16 +46,16 @@ struct LiveTranscriptionView: View {
                     .frame(width: totalWidth * 0.60)
                     .padding(.top)
                     .background(Color(white: 0.08))
-                    
+
                     VStack(alignment: .leading, spacing: 8) {}
                         .frame(width: totalWidth * 0.05)
                         .background(Color(white: 0.08))
                 }
             }
             .ignoresSafeArea(edges: .bottom)
-            
+
             VStack(spacing: 12) {
-                
+
                 RecordButton(isRecording: viewModel.isRecording) {
                     viewModel.toggleRecording()
                 }
@@ -71,35 +71,32 @@ struct LiveTranscriptionView: View {
             }
         }
         .translationTask(translationConfig) { session in
-            // Esperamos a que el ViewModel tenga el stream listo
             guard let requests = viewModel.translationRequests else { return }
 
             viewLogger.info("🚀 [UI] Translation engine active and listening")
 
-            for await text in requests {
+            var translateSeq = 0
+            for await sentence in requests {
+                guard sentence.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
+
+                let seq = translateSeq
+                translateSeq += 1
+                let startTime = Date()
+                viewLogger.info("[TRANSLATE-START id=\(seq)] '\(sentence)'")
+
                 do {
-                    // T013: extract actual sentence from request (strips "[Context: ...]\n\n" prefix)
-                    let sentence = text.components(separatedBy: "\n\n").last ?? text
-                    guard sentence.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
+                    let response = try await session.translate(sentence)
+                    let ms = Int(Date().timeIntervalSince(startTime) * 1000)
+                    let translated = response.targetText
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                    let response = try await session.translate(text)
-
-                    // T015: strip any leaked "[Context: ...]" block from translation response
-                    var translated = response.targetText
-                    if translated.hasPrefix("[") {
-                        if let doubleNewline = translated.range(of: "\n\n") {
-                            translated = String(translated[doubleNewline.upperBound...])
-                        }
-                    }
-                    translated = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                    viewLogger.info("[TRANSLATE-DONE id=\(seq) ms=\(ms)] '\(translated)'")
 
                     await MainActor.run {
-                        viewModel.appendTranslation(translated, originalSentence: sentence)
-                        viewLogger.info("✅ [UI] Translation displayed: \(translated)")
+                        viewModel.appendTranslation(translated)
                     }
                 } catch {
                     viewLogger.error("❌ [UI] Translation engine error: \(error.localizedDescription)")
-                    // Si hay un error de comunicación, forzamos un reset del config para reiniciar el motor
                     if error.localizedDescription.contains("interrupted") {
                         await MainActor.run { viewModel.stopRecording() }
                     }
@@ -121,7 +118,7 @@ struct LiveTranscriptionView: View {
         }
         .preferredColorScheme(.dark)
     }
-    
+
     private func headerView(title: String, icon: String, color: Color) -> some View {
         HStack {
             Image(systemName: icon).foregroundStyle(color)
@@ -130,7 +127,7 @@ struct LiveTranscriptionView: View {
         .padding([.horizontal, .top])
         .foregroundStyle(.secondary)
     }
-    
+
     private func englishPane() -> some View {
         ScrollViewReader { proxy in
             ScrollView {

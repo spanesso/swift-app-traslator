@@ -27,10 +27,10 @@ final class TranscriptionViewModel {
 
     var translatedSentences: [String] = []
     var emittedPhrases: [String] = []
-    // T006: O(1) duplicate guard for emittedPhrases
+    // O(1) duplicate guard for emittedPhrases
     private var emittedPhraseSet: Set<String> = []
-    // T011: context window for context-aware translation
-    private var translationContext = TranslationContextWindow()
+    // Incrementing ID for commit logs
+    private var commitCounter: Int = 0
 
     private let maxTranslatedSentences = 30
     private let maxEmittedPhrases = 50
@@ -46,10 +46,10 @@ final class TranscriptionViewModel {
     private func startRecording() {
         self.translatedSentences.removeAll()
         self.emittedPhrases.removeAll()
-        self.emittedPhraseSet.removeAll()       // T006: reset per session
-        self.translationContext = TranslationContextWindow()  // T011: reset per session
+        self.emittedPhraseSet.removeAll()
         self.translatedBuffer = ""
         self.currentBuffer = ""
+        self.commitCounter = 0
         self.isRecording = true
 
         let (stream, continuation) = AsyncStream.makeStream(of: String.self)
@@ -60,29 +60,48 @@ final class TranscriptionViewModel {
             do {
                 let (rawStream, stableStream) = try await transcribeUseCase.executeBoth()
 
-                // Task 1: Update original column — show only uncommitted tail (T007)
+                // Task 1: Update original column — show only uncommitted tail
                 let uiTask = Task { @MainActor in
                     for await segment in rawStream {
-                        // Compute committed prefix from already-emitted phrases
                         let committedText = self.emittedPhrases.joined(separator: " ")
                             .trimmingCharacters(in: .whitespaces)
                         let fullText = segment.text.trimmingCharacters(in: .whitespaces)
+
+                        if segment.isFinal {
+                            self.logger.info("[ASR-FINAL] \(fullText)")
+                        } else {
+                            self.logger.debug("[ASR-PARTIAL] \(fullText)")
+                        }
+
                         if !committedText.isEmpty, fullText.hasPrefix(committedText) {
                             let tail = String(fullText.dropFirst(committedText.count))
                                 .trimmingCharacters(in: .whitespaces)
                             self.currentBuffer = tail
+                        } else if !committedText.isEmpty {
+                            // ASR revised committed text: skip by word count
+                            let committedWordCount = committedText
+                                .split(whereSeparator: \.isWhitespace).count
+                            let allWords = fullText.split(whereSeparator: \.isWhitespace)
+                            if allWords.count > committedWordCount {
+                                self.currentBuffer = allWords
+                                    .dropFirst(committedWordCount)
+                                    .joined(separator: " ")
+                            } else {
+                                self.currentBuffer = ""
+                            }
                         } else {
                             self.currentBuffer = fullText
                         }
                     }
                 }
 
-                // Task 2: Stable phrases → translation engine with context injection (T014)
+                // Task 2: Stable phrases → translation engine (no context injection)
                 for await sentence in stableStream {
                     self.translatorState = .inFlight
-                    // T014: yield request with context block prepended
-                    self.translationContinuation?.yield(self.translationContext.requestText(for: sentence))
-                    // T006: deduplicate before appending to emittedPhrases
+                    self.logger.info("[BUFFER-APPEND] sentence='\(sentence)'")
+                    // Send the sentence directly — no context prefix to avoid leaking into translation
+                    self.translationContinuation?.yield(sentence)
+                    // Deduplicate before appending to emittedPhrases
                     if self.emittedPhraseSet.insert(sentence).inserted {
                         self.emittedPhrases.append(sentence)
                         if self.emittedPhrases.count > self.maxEmittedPhrases {
@@ -108,14 +127,12 @@ final class TranscriptionViewModel {
         Task { await transcribeUseCase.stop() }
     }
 
-    // T012: originalSentence added so context window can record the (original, translated) pair
     @MainActor
-    func appendTranslation(_ translation: String, originalSentence: String) {
-        // T017: whitespace guard
+    func appendTranslation(_ translation: String) {
         let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // T016: full-array dedup — exact match, new is subset of old, old is subset of new
+        // Full-array dedup — exact match, new is subset of old, old is subset of new
         guard !translatedSentences.contains(where: {
             $0 == trimmed || trimmed.contains($0) || $0.contains(trimmed)
         }) else {
@@ -123,9 +140,9 @@ final class TranscriptionViewModel {
             return
         }
 
-        logger.info("✅ [ViewModel] Unique Translation Added: \(trimmed)")
-        // T012: record pair in context window for future requests
-        translationContext.append(original: originalSentence, translated: trimmed)
+        let id = commitCounter
+        commitCounter += 1
+        logger.info("[COMMIT id=\(id) text='\(trimmed)']")
         translatedSentences.append(trimmed)
 
         if translatedSentences.count > maxTranslatedSentences {

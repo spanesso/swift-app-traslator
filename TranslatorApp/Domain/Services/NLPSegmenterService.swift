@@ -19,6 +19,8 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let longSentenceWordThreshold = 15
     // Mínimo para evitar micro-frases (una palabra aislada no se traduce)
     private let minShortPhraseWords = 2
+    // Fallback duro: si el buffer pendiente lleva más de este tiempo sin flush, forzamos emisión
+    private let maxPendingInterval: TimeInterval = 6.0
     // Máximo tiempo de retención al parar la grabación (T008) — default: 5.0s
     var maxFlushDelay: TimeInterval = 5.0
 
@@ -27,7 +29,12 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     // Estado por sesión — reinicializado al comienzo de processStream
     // T005: private(set) exposes committedFullText for tail computation in ViewModel
     private(set) var committedFullText: String = ""
+    private var committedWordCount: Int = 0
     private var lastSeenFullText: String = ""
+    // Rastreo de inicio del buffer pendiente para el fallback duro por tiempo
+    private var pendingStartTime: Date? = nil
+    // Contador incremental para identificar cada commit en los logs
+    private var commitCounter: Int = 0
 
     init(qualityMetrics: QualityMetricsService) {
         self.qualityMetrics = qualityMetrics
@@ -41,7 +48,10 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
 
                 // Reset por sesión
                 self.committedFullText = ""
+                self.committedWordCount = 0
                 self.lastSeenFullText = ""
+                self.pendingStartTime = nil
+                self.commitCounter = 0
 
                 var stabilityTimer: Task<Void, Never>?
 
@@ -52,13 +62,40 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                     if fullText == self.lastSeenFullText { continue }
                     self.lastSeenFullText = fullText
 
+                    // Phase 3 logging
+                    if segment.isFinal {
+                        self.logger.info("[ASR-FINAL] \(fullText)")
+                    } else {
+                        self.logger.debug("[ASR-PARTIAL] \(fullText)")
+                    }
+
                     let pending = self.pendingSuffix(of: fullText)
                     guard !pending.isEmpty else { continue }
+
+                    self.logger.debug("[BUFFER-APPEND] pending='\(pending)'")
+
+                    // Track start time for hard timeout
+                    if self.pendingStartTime == nil {
+                        self.pendingStartTime = Date()
+                    }
+
+                    // Fallback duro: el buffer pendiente lleva demasiado tiempo sin flush
+                    if let t = self.pendingStartTime, Date().timeIntervalSince(t) > self.maxPendingInterval {
+                        let toFlush = self.pendingSuffix(of: fullText)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !toFlush.isEmpty {
+                            self.logger.info("[BUFFER-FLUSH reason=timeout] '\(toFlush)'")
+                            self.emitIfViable(toFlush, continuation: continuation, tag: "timeout", forceEmit: true)
+                        }
+                        stabilityTimer?.cancel()
+                        continue
+                    }
 
                     // 1. Emitir oraciones completas detectadas por NLTokenizer
                     let sentences = self.splitIntoSentences(pending)
                     if sentences.count >= 2 {
                         for completed in sentences.dropLast() {
+                            self.logger.info("[BUFFER-FLUSH reason=sentence] '\(completed)'")
                             self.emitIfViable(completed, continuation: continuation, tag: "sentence")
                         }
                     }
@@ -71,6 +108,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                     // 2a. Terminador de oración (.!?) o isFinal del ASR → emitir ya
                     if self.endsWithTerminator(tail) || segment.isFinal {
                         let tag = segment.isFinal ? "final" : "terminator"
+                        self.logger.info("[BUFFER-FLUSH reason=\(tag)] '\(tail)'")
                         self.emitIfViable(tail, continuation: continuation, tag: tag)
                         continue
                     }
@@ -80,6 +118,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                        let cut = self.cutAtLastClauseMarker(tail) {
                         let head = cut.head.trimmingCharacters(in: .whitespacesAndNewlines)
                         if self.wordCount(of: head) >= self.minShortPhraseWords {
+                            self.logger.info("[BUFFER-FLUSH reason=wordcount] '\(head)'")
                             self.emitIfViable(head, continuation: continuation, tag: "clause")
                             continue
                         }
@@ -93,6 +132,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                         let currentTail = self.pendingSuffix(of: self.lastSeenFullText)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         guard currentTail == capturedTail else { return }
+                        self.logger.info("[BUFFER-FLUSH reason=silence] '\(capturedTail)'")
                         self.emitIfViable(capturedTail, continuation: continuation, tag: "stability")
                     }
                 }
@@ -102,6 +142,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                 let trailing = self.pendingSuffix(of: self.lastSeenFullText)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trailing.isEmpty {
+                    self.logger.info("[BUFFER-FLUSH reason=flush] '\(trailing)'")
                     self.emitIfViable(trailing, continuation: continuation, tag: "flush", forceEmit: true)
                 }
                 continuation.finish()
@@ -121,11 +162,16 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         guard forceEmit || words >= self.minShortPhraseWords else { return }
 
         commit(trimmed)
-        logger.info("✨ [Segmenter/\(tag)] words=\(words) | \(trimmed)")
+        let id = commitCounter
+        logger.info("[COMMIT id=\(id)] words=\(words) tag=\(tag) | \(trimmed)")
         continuation.yield(trimmed)
     }
 
     private func commit(_ text: String) {
+        let words = wordCount(of: text)
+        committedWordCount += words
+        pendingStartTime = nil  // reset hard timeout on successful commit
+        commitCounter += 1
         if committedFullText.isEmpty {
             committedFullText = text
         } else {
@@ -136,14 +182,21 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     // MARK: - Helpers de texto
 
     private func pendingSuffix(of fullText: String) -> String {
-        // String-prefix stripping: immune to ASR word-count drift from corrections.
-        // Falls back to full text if committed prefix is no longer present (e.g. heavy revision).
         let normalized = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         let committed = committedFullText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !committed.isEmpty else { return normalized }
-        guard normalized.hasPrefix(committed) else { return normalized }
-        return String(normalized.dropFirst(committed.count))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Intento 1: prefijo exacto (caso normal)
+        if normalized.hasPrefix(committed) {
+            return String(normalized.dropFirst(committed.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Intento 2: el ASR revisó texto ya confirmado — saltamos por número de palabras
+        // para evitar re-emitir texto comprometido
+        let words = normalized.split(whereSeparator: \.isWhitespace)
+        guard words.count > committedWordCount else { return "" }
+        return words.dropFirst(committedWordCount).joined(separator: " ")
     }
 
     private func wordCount(of text: String) -> Int {
