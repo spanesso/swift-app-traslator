@@ -67,12 +67,6 @@ TranslatorApp removes all three constraints by relying exclusively on Apple's on
 - **Structured logging via OSLog** — traceable end-to-end pipeline with prefixes like `[ASR-PARTIAL]`, `[BUFFER-FLUSH]`, `[COMMIT]`, `[TRANSLATE-START/DONE]`.
 - **No singletons, no global state** — the entire dependency graph is composed in a single `DependencyContainer`.
 
-## Screenshots / Demo
-
-> _Add a GIF or a PNG here once you record one._
->
-> Suggested capture: record a 30-second clip of a native English speaker while both panes fill in, then convert to GIF with `ffmpeg`.
-
 ## Architecture
 
 The project implements **Clean Architecture** in three layers with **MVVM** in the presentation layer. The composition root is a single `DependencyContainer`; there are no singletons or global state.
@@ -177,33 +171,6 @@ All components log with `OSLog`, subsystem `com.spanesso.TraslatorApp` and a per
 - Microphone and Speech Recognition permissions granted at runtime
 - **First run only:** the OS downloads the offline translation model for `en → es` (one-time, a few MB)
 
-### Clone & open
-
-```bash
-git clone https://github.com/<your-user>/swift-app-traslator.git
-cd swift-app-traslator
-open TranslatorApp.xcodeproj
-```
-
-### Build & run from the CLI
-
-```bash
-# Build
-xcodebuild -project TranslatorApp.xcodeproj \
-           -scheme TranslatorApp \
-           -destination 'platform=macOS' build
-
-# Run tests
-xcodebuild test -project TranslatorApp.xcodeproj \
-                -scheme TranslatorApp \
-                -destination 'platform=macOS'
-
-# Run a single UI test
-xcodebuild test -project TranslatorApp.xcodeproj \
-                -scheme TranslatorApp \
-                -destination 'platform=macOS' \
-                -only-testing:TranslatorAppUITests/TranslatorAppUITests
-```
 
 ### Info.plist keys
 
@@ -241,35 +208,3 @@ TranslatorApp/
         └── RecordButton.swift
 ```
 
-## Known Gaps / Roadmap
-
-- [ ] **Language picker** — the pair is currently hardcoded to `en-US → es-ES` in both `ContinuousSpeechListener` and `LiveTranscriptionView`.
-- [ ] **Adaptive `stabilityDelay`** — `QualityMetricsService.isLowQualitySpeech()` is computed but not yet consumed.
-- [ ] **Phrase deduplication via hashing** — `CryptoKit` is imported in `NLPSegmenterService` but unused.
-- [ ] **Session persistence** — transcripts are in-memory only.
-- [ ] **Multi-speaker diarization**.
-- [ ] **Export to PDF / plain text**.
-- [ ] **Real UI tests** — `TranslatorAppUITests` is currently scaffolding only.
-
-## Learning Path
-
-If you are studying this project to learn modern Swift, the technical document in [`specs/001-improve-transcription-translation/TranslatorApp_DocumentoTecnico.docx`](specs/001-improve-transcription-translation/) ships with a full syllabus covering:
-
-- **Basics** — types, collections, optionals, structs / classes / enums, protocols.
-- **Modern Swift** — ARC + retain cycles, `async/await`, `Task`, `Task.detached`, actors, `@MainActor`, `AsyncStream`, `@Observable`, SwiftUI advanced (`GeometryReader`, `.id()`, `.onChange`).
-- **Frameworks** — `AVFoundation`, `Speech`, `NaturalLanguage`, `Translation`, `OSLog`.
-- **Architecture** — Clean Architecture in iOS, MVVM + Observation, fan-out of `AsyncStream`, cooperative cancellation, backpressure.
-
-Each topic is cross-referenced to the exact file and construct in the codebase.
-
-## License
-
-_Choose one (MIT recommended for this project) and add a `LICENSE` file._
-
-```
-Copyright (c) 2026 Sebastian Panesso
-```
-
----
-
-Built with ❤️ in Swift, offline by design.
