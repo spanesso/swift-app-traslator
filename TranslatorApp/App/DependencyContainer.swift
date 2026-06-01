@@ -36,10 +36,14 @@ final class DependencyContainer {
         self.speechRepository = SpeechRepository(listener: listener)
         
         //  Inyectamos el servicio de métricas en el segmentador
+<<<<<<< HEAD
         // Configurable defaults: stabilityDelay=700ms, longSentenceWordThreshold=15,
         // maxFlushDelay=5.0s, TranslationContextWindow.windowSize=3
         let segmenter = NLPSegmenterService(qualityMetrics: qualityMetrics)
         self.nlpSegmenter = segmenter
+=======
+        self.nlpSegmenter = NLPSegmenterService(qualityMetrics: qualityMetrics)
+>>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
         
         //  Inyectamos métricas en el Use Case
         self.transcribeUseCase = TranscribeAudioUseCase(

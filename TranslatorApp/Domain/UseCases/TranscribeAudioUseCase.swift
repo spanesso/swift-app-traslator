@@ -37,6 +37,7 @@ final class TranscribeAudioUseCase {
         logger.info("🎯 [UseCase] Starting segmented transcription")
         return segmenter.processStream(stream)
     }
+<<<<<<< HEAD
 
     /// Produce ambos streams a partir de una sola invocación al repository.
     /// Un pump Task central fan-out cada segmento a dos continuations independientes
@@ -63,6 +64,9 @@ final class TranscribeAudioUseCase {
         return (rawOutput, segmentedOutput)
     }
 
+=======
+    
+>>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
     func stop() async {
         logger.info("🛑 [UseCase] Stopping transcription")
         await repository.stopTranscription()

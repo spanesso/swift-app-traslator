@@ -27,8 +27,15 @@ Data  →  Domain  →  Presentation
 
 ### Domain Layer
 - **`SpeechSegment`** — value type carrying `text`, `isFinal`, and `confidence`.
+<<<<<<< HEAD
 - **`TranscribeAudioUseCase`** — orchestrates the pipeline. The primary entry point is `executeBoth()`, which starts transcription and uses a detached pump `Task` to fan-out one source `AsyncStream<SpeechSegment>` into two independent streams (raw + segmenter input), because `AsyncStream` is single-consumer. Also exposes `executeRaw()` and `executeSegmented(from:)` separately.
 - **`NLPSegmenterService`** — differential segmentation using a 3-tier cascade: (1) NLTokenizer detects complete sentences and emits all but the last; (2) tails longer than 15 words are cut at the last clause marker (punctuation or discourse connector); (3) a 0.7 s stability timer fires if the ASR text stabilizes without a terminator. Emits only new deltas (≥ 2 words) over the already-committed text. Prevents micro-translations.
+=======
+- **`TranscribeAudioUseCase`** — orchestrates the two-phase pipeline:
+  1. `executeRaw()` → raw `AsyncStream<SpeechSegment>` from the repository.
+  2. `executeSegmented(from:)` → pipes the raw stream through `NLPSegmenterService`, returning `AsyncStream<String>` of stable phrase chunks.
+- **`NLPSegmenterService`** — differential segmentation: waits 1.4 s for ASR to stabilize, then emits only the new delta if it's ≥ 5 words or ends with a period. Prevents micro-translations.
+>>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
 - **`QualityMetricsService`** (`actor`) — tracks ASR quality signals per session: revision rate, stability delay, words-per-second, confidence, fragmentation. Exposes `isLowQualitySpeech()` for adaptive strategies.
 
 ### Presentation Layer
@@ -37,12 +44,17 @@ Data  →  Domain  →  Presentation
 - **`RecordButton`** — standalone record toggle component.
 
 ### Dependency wiring
+<<<<<<< HEAD
 `DependencyContainer` owns all long-lived instances and constructs the full graph in `init()`. `TranslatorAppApp` holds a single `@State private var container` so the graph lives for the app session. There are no singletons or global state anywhere in the codebase.
+=======
+`DependencyContainer` owns all long-lived instances and constructs the full graph in `init()`. `TranslatorAppApp` holds a single `@State private var container` so the graph lives for the app session.
+>>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
 
 ## Key Design Decisions
 
 - **Differential emit:** `NLPSegmenterService` tracks `lastEmittedFullText` and only yields the *delta* over the last emission, so the translation layer never sees duplicate context.
 - **Duplicate-guard in ViewModel:** `appendTranslation` drops a new sentence if it is identical to or fully contained in the last appended sentence.
+<<<<<<< HEAD
 - **Translation engine lifecycle:** On recording start, `taskID` is first mutated to a new `UUID` (forcing SwiftUI to destroy the previous `.translationTask` subtree), then `translationConfig` is assigned. On stop, `translationConfig` is set to `nil`. This ordering is required — assigning config without rotating the ID leaves a stale task consuming the old stream.
 - **Logging:** All components use `OSLog` with subsystem `com.spanesso.TraslatorApp` and per-component categories (`Speech`, `UseCase`, `Segmenter`, `Quality`, `ViewModel`, `UI`).
 
@@ -59,3 +71,7 @@ Data  →  Domain  →  Presentation
 
 ## Recent Changes
 - 001-improve-transcription-translation: Added Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog
+=======
+- **Translation engine lifecycle:** `translationConfig` is set to `nil` on stop, which tears down the `.translationTask` session. On next record, a new `UUID` is assigned to `.id(taskID)` to force SwiftUI to recreate the task.
+- **Logging:** All components use `OSLog` with subsystem `com.spanesso.TraslatorApp` and per-component categories (`Speech`, `UseCase`, `Segmenter`, `Quality`, `ViewModel`, `UI`).
+>>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
