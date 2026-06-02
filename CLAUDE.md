@@ -22,56 +22,58 @@ Data  →  Domain  →  Presentation
 ```
 
 ### Data Layer
-- **`ContinuousSpeechListener`** (Swift `actor`) — wraps `SFSpeechRecognizer` and `AVAudioEngine`. Produces an `AsyncStream<SpeechSegment>` of partial and final ASR results. Also records quality metrics on every transcript update.
+- **`ContinuousSpeechListener`** (Swift `actor`) — wraps `SFSpeechRecognizer` and `AVAudioEngine`. Produces an `AsyncStream<SpeechSegment>` of partial and final ASR results. Also records quality metrics on every transcript update. Calls `continuation.finish()` in `stop()` before setting it to `nil` — this is required for downstream `for await` loops to terminate.
 - **`SpeechRepository`** — thin adapter that conforms to `SpeechRepositoryProtocol`; delegates to `ContinuousSpeechListener`.
 
 ### Domain Layer
 - **`SpeechSegment`** — value type carrying `text`, `isFinal`, and `confidence`.
-<<<<<<< HEAD
-- **`TranscribeAudioUseCase`** — orchestrates the pipeline. The primary entry point is `executeBoth()`, which starts transcription and uses a detached pump `Task` to fan-out one source `AsyncStream<SpeechSegment>` into two independent streams (raw + segmenter input), because `AsyncStream` is single-consumer. Also exposes `executeRaw()` and `executeSegmented(from:)` separately.
-- **`NLPSegmenterService`** — differential segmentation using a 3-tier cascade: (1) NLTokenizer detects complete sentences and emits all but the last; (2) tails longer than 15 words are cut at the last clause marker (punctuation or discourse connector); (3) a 0.7 s stability timer fires if the ASR text stabilizes without a terminator. Emits only new deltas (≥ 2 words) over the already-committed text. Prevents micro-translations.
-=======
-- **`TranscribeAudioUseCase`** — orchestrates the two-phase pipeline:
-  1. `executeRaw()` → raw `AsyncStream<SpeechSegment>` from the repository.
-  2. `executeSegmented(from:)` → pipes the raw stream through `NLPSegmenterService`, returning `AsyncStream<String>` of stable phrase chunks.
-- **`NLPSegmenterService`** — differential segmentation: waits 1.4 s for ASR to stabilize, then emits only the new delta if it's ≥ 5 words or ends with a period. Prevents micro-translations.
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-- **`QualityMetricsService`** (`actor`) — tracks ASR quality signals per session: revision rate, stability delay, words-per-second, confidence, fragmentation. Exposes `isLowQualitySpeech()` for adaptive strategies.
+- **`TranscribeAudioUseCase`** — orchestrates the pipeline. The primary entry point is `executeBoth()`, which starts transcription and uses a stored detached pump `Task` to fan-out one source `AsyncStream<SpeechSegment>` into two independent streams (raw + segmenter input). `AsyncStream` is single-consumer — using it with two concurrent `for await` loops distributes elements unpredictably. The pump Task reference is stored for explicit cancellation in `stop()`.
+- **`NLPSegmenterService`** (`actor`) — differential segmentation using a 3-tier cascade: (1) NLTokenizer detects complete sentences and emits all but the last; (2) tails longer than 15 words are cut at the last clause marker (punctuation or discourse connector); (3) a silence-triggered stability timer (0.7 s normal / 1.2 s low-quality) fires when ASR stabilizes without a terminator. Emits only new deltas (≥ 2 words) over already-committed text. `isLowQualitySpeech()` from `QualityMetricsService` adapts the timer duration.
+- **`QualityMetricsService`** (`actor`) — tracks ASR quality signals per session: revision rate, stability delay, words-per-second, confidence, fragmentation. `isLowQualitySpeech()` is consumed by `NLPSegmenterService` for adaptive delay tuning.
 
 ### Presentation Layer
-- **`TranscriptionViewModel`** (`@Observable`, `@MainActor`) — drives two concurrent tasks: one updates `currentBuffer` from the raw stream (live EN text), the other feeds stable phrases into `translationRequests: AsyncStream<String>` for the Apple Translation framework.
-- **`LiveTranscriptionView`** — split-pane SwiftUI view (35 % EN / 60 % ES). Uses `.translationTask` modifier (Apple `Translation` framework, `en-US → es-ES`, offline-capable) to consume `translationRequests` and calls `viewModel.appendTranslation(_:)` with results. Auto-scrolls both panes on text change.
+- **`TranscriptionViewModel`** (`@Observable`, `@MainActor`) — drives two concurrent tasks: one updates `currentBuffer` (live EN uncommitted tail) from the raw stream; the other feeds stable phrases into `translationRequests: AsyncStream<String>` for the Apple Translation framework. `stopRecording()` finishes the translation stream before cancelling the transcription pipeline.
+- **`LiveTranscriptionView`** — split-pane SwiftUI view (35 % EN / 60 % ES). Uses `.translationTask` modifier (Apple `Translation` framework, `en-US → es-ES`, offline-capable) to consume `translationRequests`. **`taskID` is rotated before `translationConfig` is assigned** when recording starts — this is required to destroy the stale `.translationTask` subtree from the previous session.
 - **`RecordButton`** — standalone record toggle component.
 
 ### Dependency wiring
-<<<<<<< HEAD
-`DependencyContainer` owns all long-lived instances and constructs the full graph in `init()`. `TranslatorAppApp` holds a single `@State private var container` so the graph lives for the app session. There are no singletons or global state anywhere in the codebase.
-=======
-`DependencyContainer` owns all long-lived instances and constructs the full graph in `init()`. `TranslatorAppApp` holds a single `@State private var container` so the graph lives for the app session.
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
+`DependencyContainer` owns all long-lived instances and constructs the full graph in `init()`, including a **cached `TranscriptionViewModel`** returned by `makeTranscriptionViewModel()`. `TranslatorAppApp` holds a single `@State private var container` so the graph lives for the app session. There are no singletons or global state anywhere in the codebase.
 
 ## Key Design Decisions
 
-- **Differential emit:** `NLPSegmenterService` tracks `lastEmittedFullText` and only yields the *delta* over the last emission, so the translation layer never sees duplicate context.
-- **Duplicate-guard in ViewModel:** `appendTranslation` drops a new sentence if it is identical to or fully contained in the last appended sentence.
-<<<<<<< HEAD
-- **Translation engine lifecycle:** On recording start, `taskID` is first mutated to a new `UUID` (forcing SwiftUI to destroy the previous `.translationTask` subtree), then `translationConfig` is assigned. On stop, `translationConfig` is set to `nil`. This ordering is required — assigning config without rotating the ID leaves a stale task consuming the old stream.
+- **`continuation.finish()` before nil:** In `ContinuousSpeechListener.stop()`, `continuation?.finish()` is called before setting `continuation = nil`. Dropping the reference without finishing leaves any `for await` loop consuming the stream suspended indefinitely.
+- **Fan-out pump Task:** `executeBoth()` creates a `Task.detached` pump that forwards each segment to two separate `AsyncStream.Continuation` objects. The reference is stored in `pumpTask` and cancelled in `stop()`.
+- **Actor isolation for NLPSegmenterService:** Converted from `final class` to `actor` to move segmentation off the MainActor. With `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, a non-annotated class is implicitly `@MainActor` — this would block the UI on every ASR update.
+- **taskID rotation ordering:** `taskID = UUID()` MUST be assigned before `translationConfig = .init(...)` in `onChange(of: isRecording)`. SwiftUI must destroy the old `.translationTask` subtree before the new config triggers a new task — otherwise the new task reads a stale (already-finished) stream.
+- **Differential emit:** `NLPSegmenterService` tracks committed text and only yields deltas, so the translation layer never sees duplicate context.
+- **Full-array dedup in ViewModel:** `appendTranslation` drops a new sentence if it is identical to or fully contained in any existing translated sentence.
 - **Logging:** All components use `OSLog` with subsystem `com.spanesso.TraslatorApp` and per-component categories (`Speech`, `UseCase`, `Segmenter`, `Quality`, `ViewModel`, `UI`).
 
-## Known Gaps / Future Work
+## TranslatorState
 
-- **`isLowQualitySpeech()`** is computed by `QualityMetricsService` but never consumed — exists as infrastructure for adaptive `stabilityDelay` tuning.
-- **`CryptoKit`** is imported in `NLPSegmenterService` but unused — likely intended for phrase deduplication via hashing.
-- **Language pair is hardcoded** (`en-US → es-ES`) in both `ContinuousSpeechListener` and `LiveTranscriptionView`; no language picker exists.
+```swift
+enum TranslatorState {
+    case idle
+    case inFlight           // translation request in flight
+    case error              // generic ASR/audio error
+    case permissionDenied   // microphone or speech recognition auth denied
+    case modelUnavailable   // Apple Translation model not downloaded
+}
+```
+
+## Known Limitations
+
+- **Language pair is hardcoded** (`en-US → es-ES`); no language picker exists.
 - **UI tests** (`TranslatorAppUITests`) are scaffolding only — no real test logic.
+- **First-time model download** is not handled gracefully beyond an error banner; user must open System Settings manually.
 
 ## Active Technologies
-- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog (001-improve-transcription-translation)
-- In-memory only (no persistence required) (001-improve-transcription-translation)
+- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI · Speech (SFSpeechRecognizer) · AVFoundation · NaturalLanguage · Translation (Apple on-device) · SwiftData · OSLog (003-fix-save-export)
+- SwiftData (macOS 14+) — in-memory + on-disk via `ModelContainer` (003-fix-save-export)
+
+- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
+- SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog
+- In-memory only (no persistence)
 
 ## Recent Changes
-- 001-improve-transcription-translation: Added Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog
-=======
-- **Translation engine lifecycle:** `translationConfig` is set to `nil` on stop, which tears down the `.translationTask` session. On next record, a new `UUID` is assigned to `.id(taskID)` to force SwiftUI to recreate the task.
-- **Logging:** All components use `OSLog` with subsystem `com.spanesso.TraslatorApp` and per-component categories (`Speech`, `UseCase`, `Segmenter`, `Quality`, `ViewModel`, `UI`).
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
+- 003-fix-save-export: Added Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI · Speech (SFSpeechRecognizer) · AVFoundation · NaturalLanguage · Translation (Apple on-device) · SwiftData · OSLog

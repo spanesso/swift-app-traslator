@@ -8,66 +8,41 @@
 import Foundation
 import NaturalLanguage
 import OSLog
-<<<<<<< HEAD
 
-
-final class NLPSegmenterService: NLPSegmenterServiceProtocol {
+actor NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
 
-    // Respaldo corto cuando no hay límite gramatical — solo para cláusulas abiertas
-    private let stabilityDelay: UInt64 = 700_000_000 // 0.7s
-    // Si una cláusula sin terminador supera este número de palabras, forzamos corte por cláusula
+    // 0.7 s — short silence before flush under normal ASR quality
+    private let stabilityDelay: UInt64 = 700_000_000
+    // 1.2 s — longer silence when ASR quality is low
+    private let stabilityDelayLowQuality: UInt64 = 1_200_000_000
+    // Force a clause-marker cut when the pending tail exceeds this many words
     private let longSentenceWordThreshold = 15
-    // Mínimo para evitar micro-frases (una palabra aislada no se traduce)
+    // Minimum phrase length to emit (prevents micro-translations)
     private let minShortPhraseWords = 2
-    // Fallback duro: si el buffer pendiente lleva más de este tiempo sin flush, forzamos emisión
+    // Hard timeout — flush pending buffer if it has been waiting this long
     private let maxPendingInterval: TimeInterval = 6.0
-    // Máximo tiempo de retención al parar la grabación (T008) — default: 5.0s
-    var maxFlushDelay: TimeInterval = 5.0
 
     private let qualityMetrics: QualityMetricsService
 
-    // Estado por sesión — reinicializado al comienzo de processStream
-    // T005: private(set) exposes committedFullText for tail computation in ViewModel
+    // Per-session state — reset at the start of every processStream call
     private(set) var committedFullText: String = ""
     private var committedWordCount: Int = 0
     private var lastSeenFullText: String = ""
-    // Rastreo de inicio del buffer pendiente para el fallback duro por tiempo
-    private var pendingStartTime: Date? = nil
-    // Contador incremental para identificar cada commit en los logs
+    private var pendingStartTime: Date?
     private var commitCounter: Int = 0
 
     init(qualityMetrics: QualityMetricsService) {
         self.qualityMetrics = qualityMetrics
     }
 
-=======
-import CryptoKit
- 
-
-final class NLPSegmenterService: NLPSegmenterServiceProtocol {
-    private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
-    
-    //  Delay optimizado para permitir que el ASR "estabilice" las palabras anteriores
-    private let baseStabilityDelay: UInt64 = 1_400_000_000 // 1.6s
-    private let qualityMetrics: QualityMetricsService
-    
-    //  Guardamos el texto procesado para comparación de longitud y contenido
-    private var lastEmittedFullText: String = ""
-    
-    init(qualityMetrics: QualityMetricsService) {
-        self.qualityMetrics = qualityMetrics
-    }
-    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
     func processStream(_ stream: AsyncStream<SpeechSegment>) -> AsyncStream<String> {
         return AsyncStream { continuation in
             Task {
                 let sessionId = UUID().uuidString
                 await qualityMetrics.startSession(sessionId: sessionId)
-<<<<<<< HEAD
 
-                // Reset por sesión
+                // Reset per-session state
                 self.committedFullText = ""
                 self.committedWordCount = 0
                 self.lastSeenFullText = ""
@@ -83,7 +58,6 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                     if fullText == self.lastSeenFullText { continue }
                     self.lastSeenFullText = fullText
 
-                    // Phase 3 logging
                     if segment.isFinal {
                         self.logger.info("[ASR-FINAL] \(fullText)")
                     } else {
@@ -95,12 +69,11 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
 
                     self.logger.debug("[BUFFER-APPEND] pending='\(pending)'")
 
-                    // Track start time for hard timeout
                     if self.pendingStartTime == nil {
                         self.pendingStartTime = Date()
                     }
 
-                    // Fallback duro: el buffer pendiente lleva demasiado tiempo sin flush
+                    // Hard timeout — flush if buffer has been waiting too long
                     if let t = self.pendingStartTime, Date().timeIntervalSince(t) > self.maxPendingInterval {
                         let toFlush = self.pendingSuffix(of: fullText)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -108,11 +81,10 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                             self.logger.info("[BUFFER-FLUSH reason=timeout] '\(toFlush)'")
                             self.emitIfViable(toFlush, continuation: continuation, tag: "timeout", forceEmit: true)
                         }
-                        stabilityTimer?.cancel()
                         continue
                     }
 
-                    // 1. Emitir oraciones completas detectadas por NLTokenizer
+                    // 1. Emit completed sentences detected by NLTokenizer
                     let sentences = self.splitIntoSentences(pending)
                     if sentences.count >= 2 {
                         for completed in sentences.dropLast() {
@@ -121,12 +93,11 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                         }
                     }
 
-                    // Recalcular lo pendiente tras las emisiones anteriores
                     let tail = self.pendingSuffix(of: fullText)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !tail.isEmpty else { continue }
 
-                    // 2a. Terminador de oración (.!?) o isFinal del ASR → emitir ya
+                    // 2a. Sentence terminator (.!?) or isFinal → emit immediately
                     if self.endsWithTerminator(tail) || segment.isFinal {
                         let tag = segment.isFinal ? "final" : "terminator"
                         self.logger.info("[BUFFER-FLUSH reason=\(tag)] '\(tail)'")
@@ -134,7 +105,7 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                         continue
                     }
 
-                    // 2b. Cláusula larga sin terminador → cortar en marcador gramatical
+                    // 2b. Long clause without terminator → cut at last clause marker
                     if self.wordCount(of: tail) > self.longSentenceWordThreshold,
                        let cut = self.cutAtLastClauseMarker(tail) {
                         let head = cut.head.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -145,66 +116,48 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
                         }
                     }
 
-                    // 2c. Respaldo por silencio — timer corto
+                    // 2c. Silence timer — adapt delay based on ASR quality
                     let capturedTail = tail
+                    let isLowQuality = await qualityMetrics.isLowQualitySpeech()
+                    let delay = isLowQuality ? self.stabilityDelayLowQuality : self.stabilityDelay
+
                     stabilityTimer = Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: self?.stabilityDelay ?? 700_000_000)
+                        try? await Task.sleep(nanoseconds: delay)
                         guard !Task.isCancelled, let self = self else { return }
-                        let currentTail = self.pendingSuffix(of: self.lastSeenFullText)
+                        let currentTail = await self.pendingSuffix(of: self.lastSeenFullText)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         guard currentTail == capturedTail else { return }
                         self.logger.info("[BUFFER-FLUSH reason=silence] '\(capturedTail)'")
-                        self.emitIfViable(capturedTail, continuation: continuation, tag: "stability")
+                        await self.emitIfViable(capturedTail, continuation: continuation, tag: "stability")
                     }
                 }
 
-                // Stream terminado — flush de lo que quede
+                // Stream ended — flush any remaining buffer
                 stabilityTimer?.cancel()
                 let trailing = self.pendingSuffix(of: self.lastSeenFullText)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trailing.isEmpty {
                     self.logger.info("[BUFFER-FLUSH reason=flush] '\(trailing)'")
                     self.emitIfViable(trailing, continuation: continuation, tag: "flush", forceEmit: true)
-=======
-                
-                var stabilityTimer: Task<Void, Never>?
-                
-                for await segment in stream {
-                    let currentFullText = segment.text
-                    
-                    stabilityTimer?.cancel()
-                    
-                    //  Si el texto actual es más corto o igual en longitud al último emitido,
-                    // significa que el ASR está corrigiendo o no hay nada nuevo real.
-                    if currentFullText.count <= lastEmittedFullText.count {
-                        continue
-                    }
-                    
-                    stabilityTimer = Task {
-                        try? await Task.sleep(nanoseconds: baseStabilityDelay)
-                        guard !Task.isCancelled else { return }
-                        
-                        await processDifferentialText(currentFullText, to: continuation)
-                    }
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
                 }
                 continuation.finish()
             }
         }
     }
 
-<<<<<<< HEAD
-    // MARK: - Emisión
+    // MARK: - Emission
 
     private func emitIfViable(_ rawText: String,
-                              continuation: AsyncStream<String>.Continuation,
-                              tag: String,
-                              forceEmit: Bool = false) {
+                               continuation: AsyncStream<String>.Continuation,
+                               tag: String,
+                               forceEmit: Bool = false) {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let words = self.wordCount(of: trimmed)
-        guard forceEmit || words >= self.minShortPhraseWords else { return }
-
+        guard forceEmit || words >= self.minShortPhraseWords else {
+            logger.debug("[SUPPRESS reason=min-words] '\(trimmed)'")
+            return
+        }
         commit(trimmed)
         let id = commitCounter
         logger.info("[COMMIT id=\(id)] words=\(words) tag=\(tag) | \(trimmed)")
@@ -214,30 +167,24 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
     private func commit(_ text: String) {
         let words = wordCount(of: text)
         committedWordCount += words
-        pendingStartTime = nil  // reset hard timeout on successful commit
+        pendingStartTime = nil
         commitCounter += 1
-        if committedFullText.isEmpty {
-            committedFullText = text
-        } else {
-            committedFullText += " " + text
-        }
+        committedFullText = committedFullText.isEmpty ? text : committedFullText + " " + text
     }
 
-    // MARK: - Helpers de texto
+    // MARK: - Text helpers
 
     private func pendingSuffix(of fullText: String) -> String {
         let normalized = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         let committed = committedFullText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !committed.isEmpty else { return normalized }
 
-        // Intento 1: prefijo exacto (caso normal)
         if normalized.hasPrefix(committed) {
             return String(normalized.dropFirst(committed.count))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        // Intento 2: el ASR revisó texto ya confirmado — saltamos por número de palabras
-        // para evitar re-emitir texto comprometido
+        // ASR revised committed text — skip by word count to avoid re-emitting
         let words = normalized.split(whereSeparator: \.isWhitespace)
         guard words.count > committedWordCount else { return "" }
         return words.dropFirst(committedWordCount).joined(separator: " ")
@@ -264,30 +211,23 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         return result
     }
 
-    /// Corta en el último marcador gramatical disponible.
-    /// Prioridad: puntuación (`,;:—`) > conectores discursivos (`and`, `but`, `so`, `because`, `however`).
-    /// El `head` se emite como cláusula completa; el `tail` restante espera al siguiente update.
+    /// Cuts at the last grammatical clause marker.
+    /// Priority: punctuation (`,;:—`) > discourse connectors (`and`, `but`, `so`, etc.).
     private func cutAtLastClauseMarker(_ text: String) -> (head: String, tail: String)? {
         var bestCutPosition: String.Index?
 
-        // Puntuación: el marcador se incluye en el head (queda natural para traducir)
         for p in [",", ";", ":", "—"] {
             if let r = text.range(of: p, options: .backwards) {
                 let pos = r.upperBound
-                if bestCutPosition == nil || pos > bestCutPosition! {
-                    bestCutPosition = pos
-                }
+                if bestCutPosition == nil || pos > bestCutPosition! { bestCutPosition = pos }
             }
         }
 
-        // Conectores discursivos: el conector se queda con el tail (encabeza la siguiente frase)
         let connectors = [" and ", " but ", " so ", " because ", " however ", " yet ", " although "]
         for conn in connectors {
             if let r = text.range(of: conn, options: .backwards) {
                 let pos = r.lowerBound
-                if bestCutPosition == nil || pos > bestCutPosition! {
-                    bestCutPosition = pos
-                }
+                if bestCutPosition == nil || pos > bestCutPosition! { bestCutPosition = pos }
             }
         }
 
@@ -295,41 +235,5 @@ final class NLPSegmenterService: NLPSegmenterServiceProtocol {
         let head = String(text[text.startIndex..<cut])
         let tail = String(text[cut...])
         return (head, tail)
-=======
-    private func processDifferentialText(_ newFullText: String, to continuation: AsyncStream<String>.Continuation) async {
-        //  Lógica de recorte de seguridad.
-        // Si el texto nuevo empieza igual que el viejo, solo tomamos lo que sobra.
-        var delta = ""
-        
-        if newFullText.hasPrefix(lastEmittedFullText) {
-            delta = String(newFullText.dropFirst(lastEmittedFullText.count))
-        } else {
-            // Si el ASR cambió algo al inicio, buscamos el punto de divergencia
-            // para no repetir párrafos enteros.
-            delta = findActualNewContent(old: lastEmittedFullText, new: newFullText)
-        }
-        
-        let trimmedDelta = delta.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = trimmedDelta.components(separatedBy: .whitespaces)
-        
-        //  Solo emitimos si hay una "frase" sustancial (mínimo 5 palabras)
-        // para evitar micro-traducciones sin contexto.
-        if words.count >= 5 || newFullText.hasSuffix(".") {
-            logger.info("✨ [Segmenter] Delta Detected: \(trimmedDelta)")
-            lastEmittedFullText = newFullText
-            continuation.yield(trimmedDelta)
-        }
-    }
-    
-    //  Función auxiliar para encontrar realmente qué es lo nuevo
-    private func findActualNewContent(old: String, new: String) -> String {
-        let oldWords = old.components(separatedBy: .whitespaces)
-        let newWords = new.components(separatedBy: .whitespaces)
-        
-        if newWords.count > oldWords.count {
-            return newWords.dropFirst(oldWords.count).joined(separator: " ")
-        }
-        return ""
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
     }
 }

@@ -6,57 +6,72 @@
 //
 
 import SwiftUI
+import SwiftData
 
-/// Container que centraliza la creación de dependencias y asegura
-/// que los componentes vivan el tiempo necesario (Session Lifecycle).
+/// Centralized dependency graph. All long-lived instances live here for the app session.
 final class DependencyContainer {
-    
-    // 1. Data Layer (Instancias únicas para la sesión)
+
+    // MARK: - Speech pipeline
+
     private let speechListener: ContinuousSpeechListener
     private let speechRepository: SpeechRepositoryProtocol
-    
-    // 2. Domain Layer (Servicios de lógica de negocio)
     private let nlpSegmenter: NLPSegmenterServiceProtocol
-    
-    //  3. Quality Metrics Service
     private let qualityMetrics: QualityMetricsService
-    
-    // 3. Use Cases (Orquestadores)
     private let transcribeUseCase: TranscribeAudioUseCase
-    
+
+    // MARK: - Persistence
+
+    let modelContainer: ModelContainer
+    private let conversationRepository: ConversationRepositoryProtocol
+    private let saveConversationUseCase: SaveConversationUseCase
+    private let fetchConversationsUseCase: FetchConversationsUseCase
+
+    // MARK: - ViewModels (cached — created once, reused across body re-evaluations)
+
+    private let transcriptionViewModel: TranscriptionViewModel
+    private let historyViewModel: ConversationHistoryViewModel
+
     init() {
-        //  Inicializamos el servicio de métricas de calidad
-        self.qualityMetrics = QualityMetricsService()
-        
-        // Inicializamos el motor de escucha (Actor) con métricas
-        let listener = ContinuousSpeechListener(qualityMetrics: qualityMetrics)
-        self.speechListener = listener
-        
-        // Inicializamos el repositorio (Adaptador)
-        self.speechRepository = SpeechRepository(listener: listener)
-        
-        //  Inyectamos el servicio de métricas en el segmentador
-<<<<<<< HEAD
-        // Configurable defaults: stabilityDelay=700ms, longSentenceWordThreshold=15,
-        // maxFlushDelay=5.0s, TranslationContextWindow.windowSize=3
-        let segmenter = NLPSegmenterService(qualityMetrics: qualityMetrics)
-        self.nlpSegmenter = segmenter
-=======
-        self.nlpSegmenter = NLPSegmenterService(qualityMetrics: qualityMetrics)
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-        
-        //  Inyectamos métricas en el Use Case
-        self.transcribeUseCase = TranscribeAudioUseCase(
+        // Speech pipeline
+        let metrics = QualityMetricsService()
+        qualityMetrics = metrics
+
+        let listener = ContinuousSpeechListener(qualityMetrics: metrics)
+        speechListener = listener
+        speechRepository = SpeechRepository(listener: listener)
+
+        let segmenter = NLPSegmenterService(qualityMetrics: metrics)
+        nlpSegmenter = segmenter
+
+        transcribeUseCase = TranscribeAudioUseCase(
             repository: speechRepository,
             segmenter: nlpSegmenter,
-            qualityMetrics: qualityMetrics
+            qualityMetrics: metrics
+        )
+
+        // Persistence — fatalError is appropriate here: a failed SwiftData container
+        // means the app cannot function and there is nothing to recover from.
+        do {
+            modelContainer = try ModelContainer(for: ConversationRecord.self)
+        } catch {
+            fatalError("SwiftData container initialization failed: \(error)")
+        }
+        let convRepo = ConversationRepository(context: modelContainer.mainContext)
+        conversationRepository = convRepo
+        saveConversationUseCase = SaveConversationUseCase(repository: convRepo)
+        fetchConversationsUseCase = FetchConversationsUseCase(repository: convRepo)
+
+        // ViewModels
+        historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase)
+        transcriptionViewModel = TranscriptionViewModel(
+            transcribeUseCase: transcribeUseCase,
+            saveConversationUseCase: saveConversationUseCase
         )
     }
-    
-    /// Factory Method para el ViewModel.
-    /// Inyectamos el Use Case que ya tiene todas sus dependencias resueltas.
+
     @MainActor
-    func makeTranscriptionViewModel() -> TranscriptionViewModel {
-        return TranscriptionViewModel(transcribeUseCase: transcribeUseCase)
-    }
+    func makeTranscriptionViewModel() -> TranscriptionViewModel { transcriptionViewModel }
+
+    @MainActor
+    func makeHistoryViewModel() -> ConversationHistoryViewModel { historyViewModel }
 }

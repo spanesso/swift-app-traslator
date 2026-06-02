@@ -6,10 +6,6 @@
 //
 
 protocol NLPSegmenterServiceProtocol {
-    func processStream(_ stream: AsyncStream<SpeechSegment>) -> AsyncStream<String>
-<<<<<<< HEAD
-    var committedFullText: String { get }
-=======
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
+    // processStream is async because NLPSegmenterService is an actor
+    func processStream(_ stream: AsyncStream<SpeechSegment>) async -> AsyncStream<String>
 }
-

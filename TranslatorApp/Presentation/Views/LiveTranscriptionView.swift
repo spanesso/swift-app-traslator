@@ -11,16 +11,18 @@ import OSLog
 
 struct LiveTranscriptionView: View {
     var viewModel: TranscriptionViewModel
+    var historyViewModel: ConversationHistoryViewModel
+
     @State private var translationConfig: TranslationSession.Configuration?
-<<<<<<< HEAD
+    @State private var taskID = UUID()
+    @State private var showHistory: Bool = false
 
     private let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
 
-    init(viewModel: TranscriptionViewModel) {
+    init(viewModel: TranscriptionViewModel, historyViewModel: ConversationHistoryViewModel) {
         self.viewModel = viewModel
+        self.historyViewModel = historyViewModel
     }
-
-    @State private var taskID = UUID()
 
     var body: some View {
         @Bindable var bindable = viewModel
@@ -33,273 +35,148 @@ struct LiveTranscriptionView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "ORIGINAL (EN)", icon: "microphone.fill", color: .yellow)
                         englishPane()
-=======
-    
-    private let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
-    
-    init(viewModel: TranscriptionViewModel) {
-        self.viewModel = viewModel
-    }
-    
-    @State private var taskID = UUID()
-    
-    var body: some View {
-        @Bindable var bindable = viewModel
-        
-        ZStack(alignment: .topTrailing) {
-            GeometryReader { geometry in
-                let totalWidth = geometry.size.width
-                
-                HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        headerView(title: "ORIGINAL (EN)", icon: "microphone.fill", color: .yellow)
-                        scrollableTextView(text: viewModel.currentBuffer, id: "raw_end", color: .green, fontSise: 12)
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
                     }
                     .frame(width: totalWidth * 0.35)
                     .padding(.top)
                     .background(Color(white: 0.12))
-<<<<<<< HEAD
 
                     Divider().background(Color.gray.opacity(0.3))
 
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "OFFLINE TRANSLATION (ES)", icon: "character.bubble.fill", color: .blue)
                         spanishPane()
-=======
-                    
-                    Divider().background(Color.gray.opacity(0.3))
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        headerView(title: "OFFLINE TRANSLATION (ES)", icon: "character.bubble.fill", color: .blue)
-                        scrollableTextView(text: viewModel.translatedBuffer, id: "tr_end", color: .cyan)
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
                     }
                     .frame(width: totalWidth * 0.60)
                     .padding(.top)
                     .background(Color(white: 0.08))
-<<<<<<< HEAD
 
-=======
-                    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-                    VStack(alignment: .leading, spacing: 8) {}
+                    VStack {}
                         .frame(width: totalWidth * 0.05)
                         .background(Color(white: 0.08))
                 }
             }
             .ignoresSafeArea(edges: .bottom)
-<<<<<<< HEAD
 
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
+                Button { showHistory = true } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .help("Conversation History")
 
-=======
-            
-            VStack(spacing: 12) {
-                
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
                 RecordButton(isRecording: viewModel.isRecording) {
                     viewModel.toggleRecording()
                 }
+
+                if viewModel.isRecording {
+                    Button { viewModel.restartListening() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                    .help("Restart Listening")
+                }
+
+                sessionActionsView
             }
             .padding(.top, 15)
             .padding(.trailing, 5)
         }
-        .alert("Audio Engine Error", isPresented: $bindable.hasError) {
-            Button("Ok", role: .cancel) { }
+        .alert(alertTitle, isPresented: $bindable.hasError) {
+            Button("OK", role: .cancel) { viewModel.translatorState = .idle }
         } message: {
-            if let error = viewModel.errorMessage {
-                Text(error)
-            }
+            if let error = viewModel.errorMessage { Text(error) }
         }
         .translationTask(translationConfig) { session in
-<<<<<<< HEAD
-            guard let requests = viewModel.translationRequests else { return }
-
-            viewLogger.info("🚀 [UI] Translation engine active and listening")
-
-            var translateSeq = 0
+            guard let requests = viewModel.translationRequests else {
+                viewLogger.warning("⚠️ [UI] .translationTask fired but translationRequests is nil — skipping")
+                return
+            }
+            viewLogger.info("🚀 [UI] Translation engine active")
+            var seq = 0
             for await sentence in requests {
                 guard sentence.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
-
-                let seq = translateSeq
-                translateSeq += 1
-                let startTime = Date()
-                viewLogger.info("[TRANSLATE-START id=\(seq)] '\(sentence)'")
-
+                let id = seq; seq += 1
+                let t0 = Date()
+                viewLogger.info("[TRANSLATE-START id=\(id)] '\(sentence)'")
                 do {
                     let response = try await session.translate(sentence)
-                    let ms = Int(Date().timeIntervalSince(startTime) * 1000)
-                    let translated = response.targetText
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                    viewLogger.info("[TRANSLATE-DONE id=\(seq) ms=\(ms)] '\(translated)'")
-
-                    await MainActor.run {
-                        viewModel.appendTranslation(translated)
-                    }
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    let translated = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    viewLogger.info("[TRANSLATE-DONE id=\(id) ms=\(ms)] '\(translated)'")
+                    await MainActor.run { viewModel.appendTranslation(translated) }
                 } catch {
-                    viewLogger.error("❌ [UI] Translation engine error: \(error.localizedDescription)")
-=======
-            // Esperamos a que el ViewModel tenga el stream listo
-            guard let requests = viewModel.translationRequests else { return }
-            
-            viewLogger.info("🚀 [UI] Translation engine active and listening")
-            
-            for await text in requests {
-                do {
-                    // Filtro de seguridad para no saturar con micro-frases
-                    guard text.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
-                    
-                    let response = try await session.translate(text)
-                    
-                    await MainActor.run {
-                        viewModel.appendTranslation(response.targetText)
-                        viewLogger.info("✅ [UI] Translation displayed")
-                    }
-                } catch {
-                    viewLogger.error("❌ [UI] Translation engine error: \(error.localizedDescription)")
-                    // Si hay un error de comunicación, forzamos un reset del config para reiniciar el motor
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-                    if error.localizedDescription.contains("interrupted") {
+                    viewLogger.error("❌ [UI] Translation error: \(error.localizedDescription)")
+                    if error.localizedDescription.lowercased().contains("model") ||
+                       error.localizedDescription.lowercased().contains("download") {
+                        await MainActor.run {
+                            viewModel.translatorState = .modelUnavailable
+                            viewModel.errorMessage = "The Spanish translation model is not available. Open System Settings to download the Spanish language pack."
+                            viewModel.hasError = true
+                        }
+                    } else if error.localizedDescription.contains("interrupted") {
                         await MainActor.run { viewModel.stopRecording() }
                     }
                 }
             }
+            viewLogger.info("🏁 [UI] Translation stream closed")
         }
         .id(taskID)
         .onChange(of: viewModel.isRecording) { _, isRecording in
             if isRecording {
-<<<<<<< HEAD
-                // Forzar a SwiftUI a destruir el subárbol del .translationTask previo
-                // antes de asignar el nuevo config. Sin esta mutación el motor de
-                // traducción nunca se recrea entre sesiones.
                 taskID = UUID()
-=======
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-                translationConfig = .init(source: .init(identifier: "en-US"),
-                                          target: .init(identifier: "es-ES"))
+                translationConfig = .init(
+                    source: .init(identifier: "en-US"),
+                    target: .init(identifier: "es-ES")
+                )
             } else {
                 translationConfig = nil
             }
         }
+        .sheet(isPresented: $showHistory) {
+            NavigationStack {
+                ConversationHistoryView(viewModel: historyViewModel)
+            }
+            .frame(minWidth: 700, idealWidth: 900, minHeight: 500, idealHeight: 650)
+            .preferredColorScheme(.dark)
+        }
         .preferredColorScheme(.dark)
     }
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-    private func headerView(title: String, icon: String, color: Color) -> some View {
-        HStack {
-            Image(systemName: icon).foregroundStyle(color)
-            Text(title).font(.system(size: 10, weight: .bold))
-        }
-        .padding([.horizontal, .top])
-        .foregroundStyle(.secondary)
-    }
-<<<<<<< HEAD
+    // MARK: - Session actions
 
-    private func englishPane() -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    if viewModel.emittedPhrases.isEmpty && viewModel.currentBuffer.isEmpty {
-                        Text("Esperando audio...")
-                            .font(.system(size: 12, weight: .regular, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                    } else {
-                        ForEach(Array(viewModel.emittedPhrases.enumerated()), id: \.offset) { _, phrase in
-                            Text(phrase)
-                                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.45))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal)
-                        }
-
-                        Text(viewModel.currentBuffer)
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.green)
-                            .animation(.easeInOut(duration: 0.15), value: viewModel.currentBuffer)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal)
-                    }
-
-                    Color.clear.frame(height: 1).id("raw_end")
-                }
-                .padding(.vertical, 8)
+    @ViewBuilder
+    private var sessionActionsView: some View {
+        if viewModel.canSave {
+            Button {
+                Task { await viewModel.saveConversation() }
+            } label: {
+                Label(
+                    viewModel.savedSuccessfully ? "Saved!" : "Save",
+                    systemImage: viewModel.savedSuccessfully ? "checkmark.circle.fill" : "square.and.arrow.down"
+                )
+                .font(.system(size: 11, weight: .medium))
             }
-            .onChange(of: viewModel.currentBuffer) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("raw_end", anchor: .bottom)
-                }
+            .disabled(viewModel.isSaving)
+            .buttonStyle(.borderedProminent)
+            .tint(viewModel.savedSuccessfully ? .green : .blue)
+
+            ShareLink(item: viewModel.exportDocument,
+                      preview: SharePreview(viewModel.exportDocument.filename)) {
+                Label("Export", systemImage: "square.and.arrow.up")
+                    .font(.system(size: 11, weight: .medium))
             }
-            .onChange(of: viewModel.emittedPhrases.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("raw_end", anchor: .bottom)
-                }
-            }
+            .buttonStyle(.bordered)
         }
     }
 
-    private func spanishPane() -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if viewModel.translatedSentences.isEmpty {
-                        Text("Esperando traducción...")
-                            .font(.system(size: 14, weight: .regular))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                    } else {
-                        let sentences = viewModel.translatedSentences
-                        let lastIndex = sentences.count - 1
-                        ForEach(Array(sentences.enumerated()), id: \.offset) { index, sentence in
-                            let isLast = index == lastIndex
-                            Text(sentence)
-                                .font(.system(size: isLast ? 20 : 18,
-                                              weight: isLast ? .semibold : .medium))
-                                .foregroundStyle(isLast ? Color.white : Color.cyan)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal)
-                                .id(isLast ? "tr_end" : "tr_\(index)")
-                        }
-                    }
+    // MARK: - Alert
 
-                    Color.clear.frame(height: 1).id("tr_bottom")
-                }
-                .padding(.vertical, 8)
-            }
-            .onChange(of: viewModel.translatedSentences.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo("tr_bottom", anchor: .bottom)
-=======
-    
-    private func scrollableTextView(text: String, id: String, color: Color = .white , fontSise: CGFloat = 16) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(text.isEmpty ? "Esperando audio..." : text)
-                        .font(.system(size: fontSise, weight: .medium, design: .monospaced))
-                        .foregroundStyle(color)
-                        .animation(.easeInOut(duration: 0.2), value: text)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal)
-                    
-                    //  Elemento invisible que sirve de ancla para el scroll
-                    Color.clear
-                        .frame(height: 1)
-                        .id(id)
-                }
-            }
-            .onChange(of: text) { _, _ in
-                //  Forzamos el scroll al ancla invisible cada vez que el texto cambia
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(id, anchor: .bottom)
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-                }
-            }
+    private var alertTitle: String {
+        switch viewModel.translatorState {
+        case .permissionDenied: return "Permission Required"
+        case .modelUnavailable: return "Translation Model Unavailable"
+        default: return "Error"
         }
     }
 }

@@ -9,4 +9,6 @@ enum TranslatorState {
     case idle
     case inFlight
     case error
+    case permissionDenied
+    case modelUnavailable
 }

@@ -13,73 +13,130 @@ import OSLog
 final class TranscriptionViewModel {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "ViewModel")
     private let transcribeUseCase: TranscribeAudioUseCase
-<<<<<<< HEAD
+    private let saveConversationUseCase: SaveConversationUseCase
 
-=======
-    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
+    // MARK: - Published state
     var currentBuffer: String = ""
-    var translatedBuffer: String = ""
     var isRecording: Bool = false
     var hasError: Bool = false
     var errorMessage: String?
     var translatorState: TranslatorState = .idle
-<<<<<<< HEAD
 
+    var emittedPhrases: [String] = []
+    var translatedSentences: [String] = []
     var translationRequests: AsyncStream<String>?
+
+    // MARK: - Save / export state
+    var isSaving: Bool = false
+    var savedSuccessfully: Bool = false
+    var canSave: Bool { !isRecording && !emittedPhrases.isEmpty }
+
+    var exportText: String {
+        let en = emittedPhrases.joined(separator: " ")
+        let es = translatedSentences.joined(separator: "\n")
+        let enDisplay = en.isEmpty ? "(no transcript)" : en
+        let esDisplay = es.isEmpty ? "(no translation)" : es
+        return "=== ENGLISH TRANSCRIPT ===\n\n\(enDisplay)\n\n=== SPANISH TRANSLATION ===\n\n\(esDisplay)"
+    }
+    private static let exportDateFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH-mm"; return f
+    }()
+    var exportDocument: ConversationExport {
+        ConversationExport(content: exportText,
+                           filename: "Conversation \(Self.exportDateFormatter.string(from: Date())).txt")
+    }
+
+    // MARK: - Private state
     private var translationContinuation: AsyncStream<String>.Continuation?
     private var transcriptionTask: Task<Void, Never>?
-
-    var translatedSentences: [String] = []
-    var emittedPhrases: [String] = []
-    // O(1) duplicate guard for emittedPhrases
     private var emittedPhraseSet: Set<String> = []
-    // Incrementing ID for commit logs
     private var commitCounter: Int = 0
-
+    private var isRestarting: Bool = false
     private let maxTranslatedSentences = 30
     private let maxEmittedPhrases = 50
-=======
-    
-    // /CAMBIO/ Manejo de streams simplificado para evitar fugas de memoria
-    var translationRequests: AsyncStream<String>?
-    private var translationContinuation: AsyncStream<String>.Continuation?
-    private var transcriptionTask: Task<Void, Never>?
-    
-    private var translatedSentences: [String] = []
-    private let maxTranslatedSentences = 30
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
 
-    init(transcribeUseCase: TranscribeAudioUseCase) {
+    // MARK: - Init
+    init(transcribeUseCase: TranscribeAudioUseCase, saveConversationUseCase: SaveConversationUseCase) {
         self.transcribeUseCase = transcribeUseCase
+        self.saveConversationUseCase = saveConversationUseCase
     }
-<<<<<<< HEAD
 
+    // MARK: - Public API
     func toggleRecording() {
         isRecording ? stopRecording() : startRecording()
     }
 
-    private func startRecording() {
-        self.translatedSentences.removeAll()
-        self.emittedPhrases.removeAll()
-        self.emittedPhraseSet.removeAll()
-        self.translatedBuffer = ""
-        self.currentBuffer = ""
-        self.commitCounter = 0
-        self.isRecording = true
+    func restartListening() {
+        guard isRecording else { return }
+        isRestarting = true
+        isRecording = false
+        translatorState = .idle
+        translationContinuation?.finish()
+        translationContinuation = nil
+        translationRequests = nil
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        Task { [weak self] in
+            guard let self else { return }
+            await transcribeUseCase.stop()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            startRecording(preservingSession: true)
+            isRestarting = false
+        }
+    }
 
+    // MARK: - Save & Export
+    func saveConversation() async {
+        guard canSave, !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await saveConversationUseCase.execute(
+                englishText: emittedPhrases.joined(separator: " "),
+                spanishText: translatedSentences.joined(separator: "\n")
+            )
+            logger.info("[SAVE] Conversation saved successfully")
+            savedSuccessfully = true
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            savedSuccessfully = false
+        } catch ConversationError.emptyTranscript {
+            errorMessage = "Nothing to save — no speech was captured."
+            hasError = true
+        } catch {
+            errorMessage = "Save failed: \(error.localizedDescription)"
+            hasError = true
+        }
+    }
+
+    // MARK: - Recording control
+    private func startRecording(preservingSession: Bool = false) {
+        if !preservingSession {
+            translatedSentences.removeAll()
+            emittedPhrases.removeAll()
+            emittedPhraseSet.removeAll()
+            commitCounter = 0
+        }
+        currentBuffer = ""
+        errorMessage = nil
+        hasError = false
+        translatorState = .idle
+        savedSuccessfully = false
+
+        // Stream must be assigned before isRecording = true (onChange reads it immediately)
         let (stream, continuation) = AsyncStream.makeStream(of: String.self)
-        self.translationRequests = stream
-        self.translationContinuation = continuation
+        translationRequests = stream
+        translationContinuation = continuation
+
+        isRecording = true
 
         transcriptionTask = Task {
             do {
                 let (rawStream, stableStream) = try await transcribeUseCase.executeBoth()
 
-                // Task 1: Update original column — show only uncommitted tail
                 let uiTask = Task { @MainActor in
                     for await segment in rawStream {
-                        let committedText = self.emittedPhrases.joined(separator: " ")
+                        let committedText = self.emittedPhrases
+                            .joined(separator: " ")
                             .trimmingCharacters(in: .whitespaces)
                         let fullText = segment.text.trimmingCharacters(in: .whitespaces)
 
@@ -90,34 +147,27 @@ final class TranscriptionViewModel {
                         }
 
                         if !committedText.isEmpty, fullText.hasPrefix(committedText) {
-                            let tail = String(fullText.dropFirst(committedText.count))
+                            self.currentBuffer = String(fullText.dropFirst(committedText.count))
                                 .trimmingCharacters(in: .whitespaces)
-                            self.currentBuffer = tail
                         } else if !committedText.isEmpty {
-                            // ASR revised committed text: skip by word count
+                            // ASR revised already-committed text — skip by word count
                             let committedWordCount = committedText
                                 .split(whereSeparator: \.isWhitespace).count
                             let allWords = fullText.split(whereSeparator: \.isWhitespace)
-                            if allWords.count > committedWordCount {
-                                self.currentBuffer = allWords
-                                    .dropFirst(committedWordCount)
-                                    .joined(separator: " ")
-                            } else {
-                                self.currentBuffer = ""
-                            }
+                            self.currentBuffer = allWords.count > committedWordCount
+                                ? allWords.dropFirst(committedWordCount).joined(separator: " ")
+                                : ""
                         } else {
                             self.currentBuffer = fullText
                         }
                     }
                 }
 
-                // Task 2: Stable phrases → translation engine (no context injection)
                 for await sentence in stableStream {
                     self.translatorState = .inFlight
                     self.logger.info("[BUFFER-APPEND] sentence='\(sentence)'")
-                    // Send the sentence directly — no context prefix to avoid leaking into translation
                     self.translationContinuation?.yield(sentence)
-                    // Deduplicate before appending to emittedPhrases
+
                     if self.emittedPhraseSet.insert(sentence).inserted {
                         self.emittedPhrases.append(sentence)
                         if self.emittedPhrases.count > self.maxEmittedPhrases {
@@ -126,73 +176,35 @@ final class TranscriptionViewModel {
                     }
                 }
 
-=======
-    
-    func toggleRecording() {
-        isRecording ? stopRecording() : startRecording()
-    }
-    
-    private func startRecording() {
-        self.translatedSentences.removeAll()
-        self.translatedBuffer = ""
-        self.currentBuffer = ""
-        self.isRecording = true
-        
-        let (stream, continuation) = AsyncStream.makeStream(of: String.self)
-        self.translationRequests = stream
-        self.translationContinuation = continuation
-        
-        transcriptionTask = Task {
-            do {
-                let rawStream = try await transcribeUseCase.executeRaw()
-                
-                // Tarea 1: Update de UI del texto original (EN)
-                let uiTask = Task {
-                    for await segment in rawStream {
-                        self.currentBuffer = segment.text
-                    }
-                }
-                
-                // Tarea 2: Procesar segmentación y enviar al canal de traducción
-                let stableStream = transcribeUseCase.executeSegmented(from: rawStream)
-                for await sentence in stableStream {
-                    self.translatorState = .inFlight
-                    self.translationContinuation?.yield(sentence)
-                }
-                
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
                 uiTask.cancel()
+            } catch let speechError as SpeechError {
+                self.handleSpeechError(speechError)
             } catch {
                 self.errorMessage = error.localizedDescription
                 self.hasError = true
+                self.translatorState = .error
                 self.isRecording = false
             }
         }
     }
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
     func stopRecording() {
+        // Stop order matters: UI state → streams → tasks → audio engine
         isRecording = false
         translatorState = .idle
         translationContinuation?.finish()
+        translationContinuation = nil
+        translationRequests = nil
         transcriptionTask?.cancel()
+        transcriptionTask = nil
         Task { await transcribeUseCase.stop() }
     }
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
     @MainActor
     func appendTranslation(_ translation: String) {
         let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-<<<<<<< HEAD
 
-        // Full-array dedup — exact match, new is subset of old, old is subset of new
         guard !translatedSentences.contains(where: {
             $0 == trimmed || trimmed.contains($0) || $0.contains(trimmed)
         }) else {
@@ -202,31 +214,26 @@ final class TranscriptionViewModel {
 
         let id = commitCounter
         commitCounter += 1
-        logger.info("[COMMIT id=\(id) text='\(trimmed)']")
+        logger.info("[COMMIT id=\(id)] text='\(trimmed)'")
         translatedSentences.append(trimmed)
 
         if translatedSentences.count > maxTranslatedSentences {
             translatedSentences.removeFirst()
         }
-
-=======
-        
-        // /CAMBIO/ Evitar duplicados exactos o contenidos
-        if let last = translatedSentences.last, (last == trimmed || trimmed.contains(last)) {
-            self.translatorState = .idle
-            return
-        }
-        
-        logger.info("✅ [ViewModel] Unique Translation Added: \(trimmed)")
-        translatedSentences.append(trimmed)
-        
-        if translatedSentences.count > maxTranslatedSentences {
-            translatedSentences.removeFirst()
-        }
-        
-        // /CAMBIO/ El buffer se actualiza, lo que disparará el scroll en la View
->>>>>>> c854965b69dd24f9bce709588d2924586dc2b0d2
-        self.translatedBuffer = translatedSentences.joined(separator: "\n\n")
         self.translatorState = .idle
+    }
+
+    // MARK: - Error handling
+    private func handleSpeechError(_ error: SpeechError) {
+        switch error {
+        case .notAuthorized:
+            self.translatorState = .permissionDenied
+            self.errorMessage = "Microphone or speech recognition access is required. Please enable it in System Settings → Privacy & Security."
+        case .engineConfigurationFailed:
+            self.translatorState = .error
+            self.errorMessage = "Could not start the audio engine. Please try again."
+        }
+        self.hasError = true
+        self.isRecording = false
     }
 }
