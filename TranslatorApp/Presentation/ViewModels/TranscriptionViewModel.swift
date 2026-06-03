@@ -223,7 +223,18 @@ final class TranscriptionViewModel {
         self.translatorState = .idle
     }
 
+    // MARK: - Model download progress
+
+    func updateDownloadProgress(_ progress: Double) {
+        if progress >= 1.0 {
+            if case .modelDownloading = translatorState { translatorState = .idle }
+        } else {
+            translatorState = .modelDownloading(progress: progress)
+        }
+    }
+
     // MARK: - Error handling
+
     private func handleSpeechError(_ error: SpeechError) {
         switch error {
         case .notAuthorized:

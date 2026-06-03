@@ -89,14 +89,8 @@ extension LiveTranscriptionView {
                 }
                 .padding(.vertical, 8)
             }
-            // Ancla el scroll al fondo por defecto (macOS 14+).
-            // Así el contenido nuevo siempre queda visible sin que el usuario
-            // tenga que hacer scroll manualmente.
             .defaultScrollAnchor(.bottom)
             .onChange(of: viewModel.translatedSentences.count) { _, _ in
-                // Task garantiza que el layout ya estuvo actualizado antes
-                // de intentar hacer scroll, evitando que scrollTo no encuentre
-                // el nodo si el texto acaba de aparecer.
                 Task { @MainActor in
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo("tr_bottom", anchor: .bottom)
@@ -104,5 +98,38 @@ extension LiveTranscriptionView {
                 }
             }
         }
+        .overlay {
+            if case .modelDownloading(let progress) = viewModel.translatorState {
+                downloadProgressOverlay(progress: progress)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func downloadProgressOverlay(progress: Double) -> some View {
+        ZStack {
+            Color.black.opacity(0.80)
+            VStack(spacing: 16) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.blue)
+                Text("Downloading recognition model…")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(.blue)
+                    .frame(maxWidth: 260)
+                Text("\(Int(progress * 100))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.8))
+                Text("This one-time download (~632 MB) enables\naccurate recognition of any English accent.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(32)
+        }
+        .ignoresSafeArea()
     }
 }

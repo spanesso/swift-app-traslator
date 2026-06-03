@@ -60,11 +60,16 @@
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
+/* Begin PBXBuildFile section */
+		1F4785CD08274871AB3F5B5B /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 230594D71885470BA6B4D1CE /* WhisperKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		D9B306652F39F72500166158 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F4785CD08274871AB3F5B5B /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +130,7 @@
 			);
 			name = TranslatorApp;
 			packageProductDependencies = (
+				230594D71885470BA6B4D1CE /* WhisperKit */,
 			);
 			productName = TranslatorApp;
 			productReference = D9B306682F39F72500166158 /* TranslatorApp.app */;
@@ -208,6 +214,9 @@
 			);
 			mainGroup = D9B3065F2F39F72500166158;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E548E0D82FCFB022009D9067 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D9B306692F39F72500166158 /* Products */;
 			projectDirPath = "";
@@ -593,6 +602,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E548E0D82FCFB022009D9067 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		230594D71885470BA6B4D1CE /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E548E0D82FCFB022009D9067 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D9B306602F39F72500166158 /* Project object */;
 }

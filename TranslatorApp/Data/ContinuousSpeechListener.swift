@@ -15,7 +15,7 @@ actor ContinuousSpeechListener: NSObject {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en"))
 
     private var rawFullTranscript: String = ""
     private var continuation: AsyncStream<SpeechSegment>.Continuation?

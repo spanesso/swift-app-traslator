@@ -22,8 +22,11 @@ Data  →  Domain  →  Presentation
 ```
 
 ### Data Layer
-- **`ContinuousSpeechListener`** (Swift `actor`) — wraps `SFSpeechRecognizer` and `AVAudioEngine`. Produces an `AsyncStream<SpeechSegment>` of partial and final ASR results. Also records quality metrics on every transcript update. Calls `continuation.finish()` in `stop()` before setting it to `nil` — this is required for downstream `for await` loops to terminate.
-- **`SpeechRepository`** — thin adapter that conforms to `SpeechRepositoryProtocol`; delegates to `ContinuousSpeechListener`.
+- **`WhisperModelManager`** (Swift `actor`, Apple Silicon only) — downloads and caches the WhisperKit CoreML model (`large-v3-turbo`). Exposes `nonisolated let downloadProgress: AsyncStream<Double>` for first-launch UI feedback. Returns a cached `WhisperKit` instance on subsequent calls. Detects Intel Mac via `sysctlbyname("hw.optional.arm64")` and throws `.unsupportedHardware` if needed.
+- **`WhisperSpeechListener`** (Swift `actor`, Apple Silicon only) — wraps `AudioStreamTranscriber`. Converts `confirmedSegments` → `SpeechSegment(isFinal: true)` and `unconfirmedSegments` → `SpeechSegment(isFinal: false)`. Has a 30-second watchdog that restarts the audio pipeline silently if no segment arrives, without calling `continuation.finish()`.
+- **`WhisperSpeechRepository`** — thin adapter conforming to `SpeechRepositoryProtocol`; delegates to `WhisperSpeechListener`.
+- **`ContinuousSpeechListener`** (Swift `actor`, Intel Mac fallback) — wraps `SFSpeechRecognizer` (locale `"en"`) and `AVAudioEngine`. Used automatically on Intel Macs. Has its own 65-second watchdog and full-engine-stop restart pattern.
+- **`SpeechRepository`** — thin adapter for `ContinuousSpeechListener` (Intel fallback path).
 
 ### Domain Layer
 - **`SpeechSegment`** — value type carrying `text`, `isFinal`, and `confidence`.
@@ -52,12 +55,13 @@ Data  →  Domain  →  Presentation
 ## TranslatorState
 
 ```swift
-enum TranslatorState {
+enum TranslatorState: Equatable {
     case idle
-    case inFlight           // translation request in flight
-    case error              // generic ASR/audio error
-    case permissionDenied   // microphone or speech recognition auth denied
-    case modelUnavailable   // Apple Translation model not downloaded
+    case inFlight                            // translation request in flight
+    case error                               // generic ASR/audio error
+    case permissionDenied                    // microphone or speech recognition auth denied
+    case modelUnavailable                    // Apple Translation model not downloaded
+    case modelDownloading(progress: Double)  // WhisperKit first-launch download in progress
 }
 ```
 
@@ -65,15 +69,15 @@ enum TranslatorState {
 
 - **Language pair is hardcoded** (`en-US → es-ES`); no language picker exists.
 - **UI tests** (`TranslatorAppUITests`) are scaffolding only — no real test logic.
-- **First-time model download** is not handled gracefully beyond an error banner; user must open System Settings manually.
+- **WhisperKit requires Apple Silicon** — Intel Macs fall back to `ContinuousSpeechListener` (SFSpeechRecognizer, locale `"en"`) automatically; no user action needed.
 
 ## Active Technologies
-- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI · Speech (SFSpeechRecognizer) · AVFoundation · NaturalLanguage · Translation (Apple on-device) · SwiftData · OSLog (003-fix-save-export)
-- SwiftData (macOS 14+) — in-memory + on-disk via `ModelContainer` (003-fix-save-export)
-
-- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
-- SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog
-- In-memory only (no persistence)
+- Swift 6.0, macOS 14+ (Sonoma), `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
+- SwiftUI · AVFoundation · NaturalLanguage (NLTokenizer) · Translation (Apple on-device) · SwiftData · OSLog
+- Speech (SFSpeechRecognizer) — legacy fallback path (Intel Mac / non-Apple-Silicon)
+- WhisperKit (argmaxinc/argmax-oss-swift) — primary ASR backend, Apple Silicon only (004-whisperkit-asr)
+- SwiftData (macOS 14+) — in-memory + on-disk via `ModelContainer`
 
 ## Recent Changes
-- 003-fix-save-export: Added Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI · Speech (SFSpeechRecognizer) · AVFoundation · NaturalLanguage · Translation (Apple on-device) · SwiftData · OSLog
+- 004-whisperkit-asr: Added WhisperKit (argmaxinc/argmax-oss-swift) as primary ASR backend. `WhisperModelManager` actor handles model download/cache; `WhisperSpeechListener` actor provides `AsyncStream<SpeechSegment>` via `AudioStreamTranscriber`. Added `TranslatorState.modelDownloading(progress:)`. Intel Mac falls back to `ContinuousSpeechListener` (SFSpeechRecognizer, locale `"en"`).
+- 003-fix-save-export: SwiftData persistence, conversation save/export, dark card ConversationHistoryView, AirDrop export in ConversationDetailView, restart-listening button.
