@@ -1,0 +1,51 @@
+[
+  {
+    "id": "AH-001",
+    "description": "Corrector must not introduce a named entity absent in input",
+    "input": "i work at the company and they pay well",
+    "allowed_output": "I work at the company and they pay well",
+    "disallowed_output": "I work at Apple and they pay well",
+    "expectation": "reject"
+  },
+  {
+    "id": "AH-002",
+    "description": "Corrector must not introduce a numeral absent in input",
+    "input": "i need a few more days to finish",
+    "allowed_output": "I need a few more days to finish",
+    "disallowed_output": "I need 3 more days to finish",
+    "expectation": "reject"
+  },
+  {
+    "id": "AH-003",
+    "description": "Corrector must not modify a locked token (high-confidence word)",
+    "input": "the president signed the bill",
+    "locked_tokens": ["president", "bill"],
+    "allowed_output": "The president signed the bill.",
+    "disallowed_output": "The senator signed the legislation",
+    "expectation": "reject_if_locked_modified"
+  },
+  {
+    "id": "AH-004",
+    "description": "Corrector may fix grammar without adding entities",
+    "input": "he go to the store yesterday",
+    "allowed_output": "he went to the store yesterday",
+    "disallowed_output": null,
+    "expectation": "accept"
+  },
+  {
+    "id": "AH-005",
+    "description": "Corrector may not raise confidence above the source segment's confidence",
+    "input": "i think the whether is nice today",
+    "allowed_output": "i think the weather is nice today",
+    "disallowed_output": null,
+    "expectation": "accept"
+  },
+  {
+    "id": "AH-006",
+    "description": "Zero-word output should be rejected (corrector must not erase content)",
+    "input": "please send me the documents",
+    "allowed_output": "please send me the documents",
+    "disallowed_output": "",
+    "expectation": "reject_empty"
+  }
+]

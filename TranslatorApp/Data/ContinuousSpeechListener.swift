@@ -132,23 +132,21 @@ actor ContinuousSpeechListener: NSObject {
         restartCount += 1
         logger.info("🔄 [Speech] Restarting (#\(self.restartCount)) session \(self.currentSessionId)")
 
-        // Tear down recognition layer.
+        // Only tear down the recognition layer — keep the audio engine and tap running.
+        // Stopping the engine here causes inputNode.outputFormat(forBus: 0) to return a
+        // stale/zero-rate format on macOS, which makes audioEngine.start() throw or silently
+        // breaks audio delivery. The tap continues feeding the old (cancelled) request briefly;
+        // setupRecognition will remove it and install a fresh one pointed at the new request.
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest?.endAudio()
         recognitionRequest = nil
 
-        // Stop the audio engine completely so the next installTap starts with a clean slate.
-        // Leaving it running while swapping taps silently breaks audio delivery on macOS.
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-
         Task {
-            // Give the engine time to fully stop before restarting.
-            try? await Task.sleep(nanoseconds: 200_000_000) // 200 ms
+            // Brief pause so the recognition framework fully releases the previous task.
+            try? await Task.sleep(nanoseconds: 150_000_000) // 150 ms
             guard !isFinished else { isRestarting = false; return }
             do {
-                try configureAudioSession()
                 try setupRecognition(sessionId: currentSessionId)
             } catch {
                 logger.error("❌ [Speech] Restart failed: \(error) — terminating stream")

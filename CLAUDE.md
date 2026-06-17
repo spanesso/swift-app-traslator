@@ -70,6 +70,7 @@ enum TranslatorState {
 ## Active Technologies
 - Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + SwiftUI · Speech (SFSpeechRecognizer) · AVFoundation · NaturalLanguage · Translation (Apple on-device) · SwiftData · OSLog (003-fix-save-export)
 - SwiftData (macOS 14+) — in-memory + on-disk via `ModelContainer` (003-fix-save-export)
+- Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (strict concurrency) (005-accent-robust-asr)
 
 - Swift 5.0, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
 - SwiftUI, Speech (SFSpeechRecognizer), AVFoundation, NaturalLanguage (NLTokenizer), Translation (Apple on-device), OSLog

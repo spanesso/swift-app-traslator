@@ -1,23 +1,32 @@
 //
-//  Domain.swift
+//  SpeechError.swift
 //  TranslatorApp
 //
-//  Created by PANESSO Alfredo Sebastian on 11/02/26.
-//
+//  Domain-pure error type — imports Foundation only.
+//  (The original Domain.swift mixed AVFoundation + Speech here; removed in 005-accent-robust-asr.)
 
 import Foundation
-import AVFoundation
-import Speech
 
-// Error Handling
-enum SpeechError: Error, LocalizedError {
+enum SpeechError: Error, LocalizedError, Sendable {
     case notAuthorized
     case engineConfigurationFailed
-    
+    // Added in 005-accent-robust-asr
+    case modelUnavailable
+    case deviceUnsupported
+    case downloadFailed(String)
+
     var errorDescription: String? {
         switch self {
-        case .notAuthorized: return "Permissions denied for microphone or speech."
-        case .engineConfigurationFailed: return "Could not start audio engine."
+        case .notAuthorized:
+            return "Microphone or speech recognition access is required."
+        case .engineConfigurationFailed:
+            return "Could not start the audio engine. Please try again."
+        case .modelUnavailable:
+            return "The enhanced accuracy model is not installed."
+        case .deviceUnsupported:
+            return "This feature requires an iPhone 15 Pro or newer."
+        case .downloadFailed(let reason):
+            return "Model download failed: \(reason)"
         }
     }
 }
