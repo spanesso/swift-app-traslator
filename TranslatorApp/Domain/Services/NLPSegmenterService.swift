@@ -10,8 +10,9 @@ import OSLog
 actor NLPSegmenterService: NLPSegmenterServiceProtocol {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Segmenter")
 
-    private let stabilityDelay: UInt64 = 700_000_000
-    private let stabilityDelayLowQuality: UInt64 = 1_200_000_000
+    private let stabilityDelay: UInt64           = 700_000_000    // 0.7s — normal
+    private let stabilityDelayLowQuality: UInt64 = 1_200_000_000  // 1.2s — low quality ASR
+    private let stabilityDelayIncomplete: UInt64 = 2_500_000_000  // 2.5s — grammatically open phrase
     private let longSentenceWordThreshold = 15
     private let minShortPhraseWords = 2
     private let maxPendingInterval: TimeInterval = 6.0
@@ -108,7 +109,16 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
 
                     let capturedTail = tail
                     let isLowQuality = await qualityMetrics.isLowQualitySpeech()
-                    let delay = isLowQuality ? stabilityDelayLowQuality : stabilityDelay
+                    let isIncomplete = isLikelyIncomplete(tail)
+                    let delay: UInt64
+                    if isIncomplete {
+                        delay = stabilityDelayIncomplete
+                        logger.debug("[SEGMENTER] phrase open (grammar), extending timer: '\(tail)'")
+                    } else if isLowQuality {
+                        delay = stabilityDelayLowQuality
+                    } else {
+                        delay = stabilityDelay
+                    }
                     stabilityTimer = Task { [weak self] in
                         try? await Task.sleep(nanoseconds: delay)
                         guard !Task.isCancelled, let self else { return }
@@ -149,6 +159,32 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
         pendingStartTime = nil
         commitCounter += 1
         committedFullText = committedFullText.isEmpty ? text : committedFullText + " " + text
+    }
+
+    // MARK: - Grammatical completeness
+
+    /// Returns true when the phrase is grammatically open and likely unfinished.
+    /// Signals the stability timer to wait longer before committing.
+    private func isLikelyIncomplete(_ text: String) -> Bool {
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = text
+        var lastTag: NLTag?
+        var hasVerb = false
+        tagger.enumerateTags(in: text.startIndex..<text.endIndex,
+                             unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, _ in
+            if let tag {
+                lastTag = tag
+                if tag == .verb { hasVerb = true }
+            }
+            return true
+        }
+        // Dangling function-word at end = phrase not closed
+        let dangling: Set<NLTag> = [.preposition, .conjunction, .determiner, .particle]
+        if let last = lastTag, dangling.contains(last) { return true }
+        // Multi-word phrase with no verb detected = likely a fragment mid-sentence
+        if !hasVerb && wordCountOf(text) > 2 { return true }
+        return false
     }
 
     // MARK: - Text helpers
