@@ -30,7 +30,7 @@ final class TranscribeAudioUseCase {
     /// Starts transcription and fans out to two consumers:
     /// - `raw`: every ASR update (EN live display + hypothesis)
     /// - `segmented`: stable, corrected phrase chunks (translation engine)
-    func executeBoth() async throws -> (raw: AsyncStream<SpeechSegment>, segmented: AsyncStream<String>) {
+    func executeBoth() async throws -> (raw: AsyncStream<SpeechSegment>, segmented: AsyncStream<SegmentedPhrase>) {
         logger.info("🎯 [UseCase] Starting dual-output transcription (fan-out)")
         let sourceStream = try await repository.startTranscription()
         recentFinalSegments = []

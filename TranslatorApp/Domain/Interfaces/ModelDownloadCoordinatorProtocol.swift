@@ -9,7 +9,9 @@ import Foundation
 
 protocol ModelDownloadCoordinatorProtocol: Sendable {
     var currentState: ModelInstallState { get async }
-    func stateStream() -> AsyncStream<ModelInstallState>
+    // `async` because the conformer is an actor. Declaring it synchronously produced an
+    // isolation-mismatch warning that is an error in the Swift 6 language mode (gate G5).
+    func stateStream() async -> AsyncStream<ModelInstallState>
     func acceptDownload() async
     func declineDownload() async
     /// Re-arms the consent prompt after a declined or failed download.

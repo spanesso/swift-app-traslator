@@ -39,7 +39,7 @@ enum ModelInstallState: Sendable, Equatable, CustomStringConvertible {
         return nil
     }
 
-    var description: String {
+    nonisolated var description: String {
         switch self {
         case .notRequested:               return "notRequested"
         case .awaitingConsent:            return "awaitingConsent"

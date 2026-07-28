@@ -6,13 +6,11 @@
 import SwiftUI
 import OSLog
 
-/// Carries a translated sentence and its source-segment confidence for tonal opacity rendering.
-struct TranslationEntry: Sendable {
-    let text: String
-    let minSourceConfidence: Float
-}
-
+/// A phrase queued for translation. Carries the fragment id so the result can be routed back to
+/// the exact fragment it belongs to — previously the two sides were only related by arrival
+/// order, which is what let the English and Spanish lists drift apart.
 struct TranslationRequest: Sendable {
+    let fragmentId: Int
     let text: String
     let sourceConfidence: Float
 }
@@ -20,207 +18,133 @@ struct TranslationRequest: Sendable {
 @MainActor
 @Observable
 final class TranscriptionViewModel {
-    private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "ViewModel")
-    private let transcribeUseCase: TranscribeAudioUseCase
-    private let saveConversationUseCase: SaveConversationUseCase
+    let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "ViewModel")
+    let transcribeUseCase: TranscribeAudioUseCase
+    let saveConversationUseCase: SaveConversationUseCase
     let downloadCoordinator: BackgroundAssetsCoordinator
+    private let audioSessionCoordinator: any AudioSessionCoordinatorProtocol
+    let telemetry: any PipelineTelemetryProtocol
 
     // MARK: - State
+
     var currentBuffer: String = ""
-    var isRecording: Bool = false
     var hasError: Bool = false
     var errorMessage: String?
     var translatorState: TranslatorState = .idle
     var modelInstallState: ModelInstallState = .notRequested
     var enginePreference: EnginePreference = .fromUserDefaults()
 
-    var emittedPhrases: [String] = []
-    var translatedSentences: [TranslationEntry] = []
-    var translationRequests: AsyncStream<TranslationRequest>?
+    /// The single ordered list of conversation fragments. Replaces the two parallel arrays whose
+    /// counts nothing kept in step.
+    var fragments: [ConversationFragment] = []
 
+    /// Lifecycle of the user-visible recording session. An interruption moves this to
+    /// `.suspended`, NOT to `.idle` — that distinction is the whole of US5.
+    var sessionState: RecordingSessionState = .idle
+
+    var translationRequests: AsyncStream<TranslationRequest>?
     var isSaving: Bool = false
     var savedSuccessfully: Bool = false
-    var canSave: Bool { !isRecording && !emittedPhrases.isEmpty }
+    var latestSegmentConfidence: Float = 1.0
 
-    var exportText: String {
-        let en = emittedPhrases.joined(separator: " ")
-        let es = translatedSentences.map(\.text).joined(separator: "\n")
-        return "=== ENGLISH TRANSCRIPT ===\n\n\(en.isEmpty ? "(no transcript)" : en)\n\n=== SPANISH TRANSLATION ===\n\n\(es.isEmpty ? "(no translation)" : es)"
-    }
-    private static let exportDateFmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH-mm"; return f
-    }()
-    var exportDocument: ConversationExport {
-        ConversationExport(content: exportText,
-                           filename: "Conversation \(Self.exportDateFmt.string(from: Date())).txt")
-    }
+    /// Kept as a derived value so existing views and `onChange` observers are unaffected.
+    var isRecording: Bool { sessionState.isRecording }
+    var isSuspended: Bool { sessionState.isSuspended }
+    var suspensionReason: AudioInterruptionReason? { sessionState.suspensionReason }
+    var canSave: Bool { !isRecording && !fragments.isEmpty }
 
     // MARK: - Private state
-    private var translationContinuation: AsyncStream<TranslationRequest>.Continuation?
-    private var transcriptionTask: Task<Void, Never>?
+
+    var translationContinuation: AsyncStream<TranslationRequest>.Continuation?
+    var transcriptionTask: Task<Void, Never>?
     private var downloadStateTask: Task<Void, Never>?
-    private var emittedPhraseSet: Set<String> = []
-    private var commitCounter: Int = 0
-    private var isRestarting: Bool = false
-    var latestSegmentConfidence: Float = 1.0
-    private let maxTranslated = 30
-    private let maxEmitted = 50
+    private var audioEventTask: Task<Void, Never>?
+    var fragmentKeys: Set<String> = []
+    var nextFragmentId: Int = 0
+    var sessionId = "----"
+
+    /// Pure, unit-testable reconciliation of the live tail. Its baseline is what has been
+    /// committed since the CURRENT recognition session began — not the whole meeting, which is
+    /// what used to freeze the English pane a minute in.
+    var reconciler = LiveTailReconciler()
+    var lastSeenGeneration = 0
 
     // MARK: - Init
+
     init(transcribeUseCase: TranscribeAudioUseCase,
          saveConversationUseCase: SaveConversationUseCase,
-         downloadCoordinator: BackgroundAssetsCoordinator) {
+         downloadCoordinator: BackgroundAssetsCoordinator,
+         audioSessionCoordinator: any AudioSessionCoordinatorProtocol,
+         telemetry: any PipelineTelemetryProtocol) {
         self.transcribeUseCase = transcribeUseCase
         self.saveConversationUseCase = saveConversationUseCase
         self.downloadCoordinator = downloadCoordinator
+        self.audioSessionCoordinator = audioSessionCoordinator
+        self.telemetry = telemetry
         subscribeToDownloadState()
+        subscribeToAudioEvents()
     }
 
-    // MARK: - Download coordinator
+    // MARK: - Subscriptions
 
     private func subscribeToDownloadState() {
         downloadStateTask = Task { [weak self] in
             guard let self else { return }
             for await state in await downloadCoordinator.stateStream() {
-                await MainActor.run { self.modelInstallState = state }
+                self.modelInstallState = state
             }
         }
     }
 
-    func acceptModelDownload() {
-        Task { await downloadCoordinator.acceptDownload() }
+    /// Drives the UI from audio-system events. The recovery itself happens in the engine; this
+    /// only makes what is happening visible and honest.
+    private func subscribeToAudioEvents() {
+        let events = audioSessionCoordinator.eventStream()
+        audioEventTask = Task { [weak self] in
+            for await event in events {
+                guard let self else { return }
+                switch event {
+                case .interrupted(let reason):
+                    self.enterSuspended(reason: reason)
+                case .captureNeedsRebuild:
+                    // Deliberately NOT a user-visible pause. Rebuilding the tap after a device
+                    // change is an internal, sub-second operation that the engine handles; if it
+                    // fails, the engine suspends and the coordinator publishes `.interrupted`,
+                    // which is what reaches the banner. Surfacing every rebuild announced a
+                    // pause that had not happened.
+                    break
+                case .resumed:
+                    self.leaveSuspended()
+                case .giveUp(let afterMs):
+                    self.abandonAfterInterruption(afterMs: afterMs)
+                }
+            }
+        }
     }
 
-    func declineModelDownload() {
-        Task { await downloadCoordinator.declineDownload() }
-    }
+    func acceptModelDownload() { Task { await downloadCoordinator.acceptDownload() } }
+    func declineModelDownload() { Task { await downloadCoordinator.declineDownload() } }
 
     func saveEnginePreference(_ pref: EnginePreference) {
         enginePreference = pref
         pref.saveToUserDefaults()
     }
 
-    // MARK: - Recording
+    // MARK: - Recording control
+
     func toggleRecording() { isRecording ? stopRecording() : startRecording() }
 
+    /// Manual restart. The 300 ms sleep this used to contain is gone: it deterministically threw
+    /// away a third of a second of audio with the engine already stopped, and the recogniser
+    /// rotation path (which loses nothing) does the same job.
     func restartListening() {
         guard isRecording else { return }
-        isRestarting = true; isRecording = false; translatorState = .idle
-        translationContinuation?.finish(); translationContinuation = nil; translationRequests = nil
         transcriptionTask?.cancel(); transcriptionTask = nil
+        translationContinuation?.finish(); translationContinuation = nil; translationRequests = nil
         Task { [weak self] in
             guard let self else { return }
-            await transcribeUseCase.stop()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            startRecording(preservingSession: true)
-            isRestarting = false
+            await self.transcribeUseCase.stop()
+            self.startRecording(preservingSession: true)
         }
-    }
-
-    func handleAudioInterruption() {
-        translatorState = .permissionDenied
-        errorMessage = "Microphone access was interrupted."
-        hasError = true
-        if isRecording { stopRecording() }
-    }
-
-    // MARK: - Save & Export
-    func saveConversation() async {
-        guard canSave, !isSaving else { return }
-        isSaving = true; defer { isSaving = false }
-        do {
-            try await saveConversationUseCase.execute(
-                englishText: emittedPhrases.joined(separator: " "),
-                spanishText: translatedSentences.map(\.text).joined(separator: "\n")
-            )
-            savedSuccessfully = true
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            savedSuccessfully = false
-        } catch ConversationError.emptyTranscript {
-            errorMessage = "Nothing to save — no speech was captured."; hasError = true
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"; hasError = true
-        }
-    }
-
-    // MARK: - Recording internals
-    private func startRecording(preservingSession: Bool = false) {
-        if !preservingSession {
-            translatedSentences.removeAll(); emittedPhrases.removeAll()
-            emittedPhraseSet.removeAll(); commitCounter = 0
-        }
-        currentBuffer = ""; errorMessage = nil; hasError = false
-        translatorState = .idle; savedSuccessfully = false; latestSegmentConfidence = 1.0
-
-        let (stream, cont) = AsyncStream.makeStream(of: TranslationRequest.self)
-        translationRequests = stream; translationContinuation = cont
-        isRecording = true
-
-        transcriptionTask = Task {
-            do {
-                let (rawStream, stableStream) = try await transcribeUseCase.executeBoth()
-                let uiTask = Task { @MainActor in
-                    for await segment in rawStream {
-                        self.latestSegmentConfidence = segment.confidence
-                        let committed = self.emittedPhrases.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-                        let full = segment.text.trimmingCharacters(in: .whitespaces)
-                        if !committed.isEmpty, full.hasPrefix(committed) {
-                            self.currentBuffer = String(full.dropFirst(committed.count)).trimmingCharacters(in: .whitespaces)
-                        } else if !committed.isEmpty {
-                            let cw = committed.split(whereSeparator: \.isWhitespace).count
-                            let aw = full.split(whereSeparator: \.isWhitespace)
-                            self.currentBuffer = aw.count > cw ? aw.dropFirst(cw).joined(separator: " ") : ""
-                        } else { self.currentBuffer = full }
-                    }
-                }
-                for await sentence in stableStream {
-                    self.translatorState = .inFlight
-                    let conf = self.latestSegmentConfidence
-                    self.translationContinuation?.yield(TranslationRequest(text: sentence, sourceConfidence: conf))
-                    if self.emittedPhraseSet.insert(sentence).inserted {
-                        self.emittedPhrases.append(sentence)
-                        if self.emittedPhrases.count > self.maxEmitted { self.emittedPhrases.removeFirst() }
-                    }
-                }
-                uiTask.cancel()
-                if self.isRecording {
-                    self.isRecording = false; self.translatorState = .idle
-                    self.translationContinuation?.finish(); self.translationContinuation = nil
-                }
-            } catch let e as SpeechError { handleSpeechError(e) }
-            catch { errorMessage = error.localizedDescription; hasError = true; translatorState = .error; isRecording = false }
-        }
-    }
-
-    func stopRecording() {
-        isRecording = false; translatorState = .idle
-        translationContinuation?.finish(); translationContinuation = nil; translationRequests = nil
-        transcriptionTask?.cancel(); transcriptionTask = nil
-        Task { await transcribeUseCase.stop() }
-    }
-
-    func appendTranslation(_ translation: String, sourceConfidence: Float = 1.0) {
-        let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard !translatedSentences.contains(where: {
-            $0.text == trimmed || trimmed.contains($0.text) || $0.text.contains(trimmed)
-        }) else { translatorState = .idle; return }
-        commitCounter += 1
-        logger.info("[COMMIT id=\(self.commitCounter)] text='\(trimmed)'")
-        translatedSentences.append(TranslationEntry(text: trimmed, minSourceConfidence: sourceConfidence))
-        if translatedSentences.count > maxTranslated { translatedSentences.removeFirst() }
-        translatorState = .idle
-    }
-
-    private func handleSpeechError(_ error: SpeechError) {
-        switch error {
-        case .notAuthorized:
-            translatorState = .permissionDenied
-            errorMessage = "Microphone or speech recognition access is required."
-        default:
-            translatorState = .error
-            errorMessage = "Could not start the audio engine. Please try again."
-        }
-        hasError = true; isRecording = false
     }
 }

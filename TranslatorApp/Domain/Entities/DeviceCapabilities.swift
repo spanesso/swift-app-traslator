@@ -8,8 +8,11 @@ import Foundation
 
 enum DeviceCapabilities {
     /// True on iPhone 15 Pro / 15 Pro Max (A17 Pro) and any newer iPhone (A18+).
-    /// Used to gate WhisperKit Tier 1 and Foundation Models Tier 2.
-    static var supportsA17Pro: Bool {
+    /// Used to gate the Foundation Models corrector.
+    ///
+    /// `nonisolated` because actors read it: with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
+    /// it would otherwise be MainActor-isolated, which is an error in the Swift 6 language mode.
+    nonisolated static var supportsA17Pro: Bool {
         #if targetEnvironment(simulator)
         // Allow testing in simulator by checking an env override
         return ProcessInfo.processInfo.environment["SIMULATE_A17PRO"] == "1"
@@ -29,7 +32,7 @@ enum DeviceCapabilities {
     }
 
     /// True on iOS 26 and later, where SpeechAnalyzer and Foundation Models are available.
-    static var supportsEnhancedFrameworks: Bool {
+    nonisolated static var supportsEnhancedFrameworks: Bool {
         if #available(iOS 26.0, *) { return true }
         return false
     }

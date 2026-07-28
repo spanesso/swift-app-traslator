@@ -32,4 +32,24 @@ enum EnginePreference: String, Sendable, Codable, CaseIterable {
         case .whisperPreferred: return "Enhanced Accuracy"
         }
     }
+
+    /// Whether this build can actually deliver the option (008 decision Q1).
+    ///
+    /// The local WhisperKit engine is withdrawn in this phase, so `whisperPreferred` is offered
+    /// as unavailable rather than as a choice that silently fails. The case itself is NOT
+    /// removed: users already have that raw value stored in preferences and deleting it would
+    /// break decoding.
+    nonisolated var isAvailable: Bool {
+        switch self {
+        case .auto, .appleOnly:  return true
+        case .whisperPreferred:  return false
+        }
+    }
+
+    /// Shown next to an unavailable option so the choice is explained, not just greyed out.
+    nonisolated var unavailableReason: String? {
+        isAvailable
+            ? nil
+            : "Temporarily unavailable. The on-device model is being reworked and is disabled in this build."
+    }
 }

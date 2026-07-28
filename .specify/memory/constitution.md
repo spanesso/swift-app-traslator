@@ -1,50 +1,90 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# TranslatorApp Constitution
+
+Derived from the project rules already in force in `CLAUDE.md`. Written during feature
+008-fix-audio-pipeline-resilience, whose `plan.md` had to declare that this file was an
+unfilled template and that its gates therefore carried no weight.
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Clean Architecture, one direction
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+`Presentation → Domain ← Data`. `App` is the only layer aware of all three.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+`Domain` imports **only** `Foundation` (plus `OSLog` for logging). It must never import
+AVFoundation, Speech, SwiftUI, UIKit or SwiftData. Framework types stop at the layer boundary:
+errors cross as `(domain: String, code: Int)`, audio causes as domain enums.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+Violations to reject: `Presentation` importing `Data`; `Domain` importing a framework;
+Views creating ViewModels with `@StateObject`.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### II. Composition root owns the graph
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+`DependencyContainer` constructs every long-lived instance in `init()`. ViewModels are owned
+only there and passed into Views. No singletons, no global mutable state.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. The MainActor is for UI only
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` means everything is MainActor-isolated unless it
+says otherwise. Anything reached from an actor or from the audio render thread must be
+explicitly `nonisolated` — including static members and, where needed, whole classes.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+Nothing over ~5 ms runs on the MainActor. Nothing that allocates, locks for long, or awaits
+runs on the audio render thread.
+
+### IV. Build clean under strict concurrency (NON-NEGOTIABLE)
+
+Zero concurrency warnings. When one appears, fix the isolation; do not silence it.
+
+`@unchecked Sendable` requires a written justification in the file header naming what provides
+safety instead of the actor system, and what the lock is and is not held across. It is
+currently used exactly twice, both on the audio path.
+
+### V. Absence must be visible
+
+A failure that produces no artefact is worse than a loud one. A dropped translation carries a
+marker and keeps its line; a session that dies logs its error domain and code; a suspended
+recording says it is suspended. Silent truncation, empty catches, and states indistinguishable
+from success are defects regardless of what the code "does".
+
+### VI. Instrument before you claim
+
+An intermittent symptom is not fixed until the fix is observable in the field. Structured
+telemetry (`Telemetry` category, `[KIND] sid=… key=value`) is part of the feature, not a
+follow-up. Event prefixes are a published interface: renaming one breaks every saved filter.
+
+Telemetry never blocks, never throws, and never carries transcribed text.
+
+## Additional Constraints
+
+- **Platform:** iOS/iPadOS 26.1+, Swift 5 language mode. Pure Xcode project; the file-system
+  synchronized groups mean new files join their target without editing `project.pbxproj`.
+- **No new dependencies.** No package managers beyond what is already present.
+- **Max 250 lines per Swift file.** Split by responsibility, not by cutting arbitrarily.
+- **Logging:** `OSLog`, subsystem `com.spanesso.TraslatorApp`, one category per component.
+- **Language pair** is `en-US → es-ES`. Transcription and translation stay on-device.
+
+## Development Workflow
+
+- **Validate on a physical device.** The simulator does not reproduce `AVAudioSession`
+  behaviour, interruptions, or route changes — precisely the areas that keep breaking.
+- **Capture a baseline before changing anything.** A measurement you cannot compare against is
+  an impression.
+- **Pure logic goes in `Domain` and gets unit tests** in `TranslatorAppTests`. If a rule cannot
+  be tested without audio hardware, it is probably in the wrong layer.
+- **Every regression that reached a user earns a test** that fails on the old code.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution supersedes habit. Amendments require updating this file and `CLAUDE.md`
+together.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+Non-negotiable operational rules:
+
+1. **No commits.** The user handles all git manually.
+2. **No creating branches without asking** the name and whether to stay on the current one.
+3. **No pushing.** The user owns the remote.
+
+Complexity must be justified in writing, in the plan that introduces it. "It is cleaner" is not
+a justification; "it removes a duplicate that already diverged once" is.
+
+**Version**: 1.0.0 | **Ratified**: 2026-07-28 | **Last Amended**: 2026-07-28

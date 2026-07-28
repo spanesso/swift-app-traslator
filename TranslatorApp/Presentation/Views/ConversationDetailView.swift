@@ -21,12 +21,21 @@ struct ConversationDetailView: View {
         return f
     }()
 
+    /// Delegates to the single formatter. This used to be a byte-for-byte duplicate of the one
+    /// in the ViewModel, so the two could — and did — drift apart.
     private var exportDocument: ConversationExport {
-        let en = conversation.englishText.isEmpty ? "(no transcript)" : conversation.englishText
-        let es = conversation.spanishText.isEmpty ? "(no translation)" : conversation.spanishText
-        let content = "=== ENGLISH TRANSCRIPT ===\n\n\(en)\n\n=== SPANISH TRANSLATION ===\n\n\(es)"
+        let content = ConversationTextFormatter.exportDocument(english: conversation.englishText,
+                                                               spanish: conversation.spanishText)
         let dateStr = Self.exportDateFormatter.string(from: conversation.savedAt)
         return ConversationExport(content: content, filename: "Conversation \(dateStr).txt")
+    }
+
+    /// Conversations saved before feature 008 have no positional guarantee between the two
+    /// blocks. They open and export fine; the app just does not claim an alignment it cannot
+    /// honour, and makes no attempt to infer one (FR-044).
+    private var isLegacyFormat: Bool {
+        ConversationTextFormatter.isLegacyFormat(english: conversation.englishText,
+                                                 spanish: conversation.spanishText)
     }
 
     var body: some View {
@@ -57,6 +66,12 @@ struct ConversationDetailView: View {
                 Text(Self.titleFormatter.string(from: conversation.savedAt))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            }
+            if isLegacyFormat {
+                Label("Legacy format", systemImage: "clock.badge.exclamationmark")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .help("Saved before line-by-line pairing existed; the two columns are not aligned.")
             }
             Spacer()
             ShareLink(item: exportDocument, preview: SharePreview(exportDocument.filename)) {

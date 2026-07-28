@@ -15,7 +15,7 @@ import WhisperKit
 actor WhisperKitEngine: SpeechEngineProtocol {
     let engineId: EngineId = .whisperKitTurbo
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "WhisperKit")
-    private let vadGate = VADGate()
+    // Empty-segment filtering is applied ONCE in SpeechRepository for every engine (006).
 
     private var whisperKit: WhisperKit?
     private var audioEngine: AVAudioEngine?
@@ -48,7 +48,7 @@ actor WhisperKitEngine: SpeechEngineProtocol {
         audioBuffer = []
         try setupAudio()
         scheduleTranscriptionLoop()
-        return await vadGate.filter(stream)
+        return stream
     }
 
     func stop() async {

@@ -6,6 +6,15 @@
 	<array>
 		<dict/>
 	</array>
+    <!-- Feature 008, decision Q3: capture must continue while the screen is locked with the
+         app in the foreground. iOS does not distinguish "locked with the app in front" from
+         "backgrounded" for microphone capture, so the audio background mode is required.
+         Accepted consequence: higher battery use and an App Store review justification. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+
     <key>NSMicrophoneUsageDescription</key>
     <string>Necesitamos acceso al micrófono para transcribir tu voz en tiempo real y poder traducirla.</string>
 

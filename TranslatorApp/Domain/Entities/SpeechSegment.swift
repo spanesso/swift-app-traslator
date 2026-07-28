@@ -14,13 +14,26 @@ struct SpeechSegment: Sendable {
     let source: EngineId
     let isHypothesis: Bool
 
+    /// Which recognition session produced this segment (008-fix-audio-pipeline-resilience, US2).
+    ///
+    /// Incremented on every internal rotation. Consumers that track cumulative text — the
+    /// segmenter and the live-tail reconciler — use a change in this value to know the
+    /// recogniser restarted its transcript from zero, so their committed baseline is no longer
+    /// comparable.
+    ///
+    /// Travelling ON the segment rather than through a side channel is deliberate: a separate
+    /// signal could arrive before or after the first segment of the new generation, and the
+    /// reconciler would reset at the wrong moment.
+    let sessionGeneration: Int
+
     nonisolated init(
         text: String,
         isFinal: Bool,
         confidence: Float = 1.0,
         tokens: [TranscriptToken] = [],
         source: EngineId = .legacyAppleSFSpeech,
-        isHypothesis: Bool = false
+        isHypothesis: Bool = false,
+        sessionGeneration: Int = 0
     ) {
         self.text = text
         self.isFinal = isFinal
@@ -28,5 +41,6 @@ struct SpeechSegment: Sendable {
         self.tokens = tokens
         self.source = source
         self.isHypothesis = isHypothesis
+        self.sessionGeneration = sessionGeneration
     }
 }

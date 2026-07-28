@@ -14,10 +14,9 @@ struct LiveTranscriptionView: View {
     @State private var translationConfig: TranslationSession.Configuration?
     @State private var taskID = UUID()
     @State private var showHistory: Bool = false
-    @State private var showWhisperConsent: Bool = false
     @State private var showEngineSettings: Bool = false
 
-    private let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
+    let viewLogger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "UI")
 
     init(viewModel: TranscriptionViewModel, historyViewModel: ConversationHistoryViewModel) {
         self.viewModel = viewModel
@@ -57,9 +56,10 @@ struct LiveTranscriptionView: View {
             }
             .ignoresSafeArea(edges: .bottom)
 
-            // Download progress overlay
-            if case .downloading(let progress) = viewModel.modelInstallState {
-                asmrDownloadBanner(progress: progress)
+            // Suspension banner (008 US5): a recoverable pause, stated honestly. This is what
+            // replaces the "Permission Required" alert every interruption used to raise.
+            if let reason = viewModel.suspensionReason {
+                suspensionBanner(reason: reason)
             }
 
             // Sidebar buttons
@@ -101,67 +101,13 @@ struct LiveTranscriptionView: View {
         } message: {
             if let error = viewModel.errorMessage { Text(error) }
         }
-        .confirmationDialog("Upgrade ASR Engine?", isPresented: $showWhisperConsent, titleVisibility: .visible) {
-            Button("Download (~600 MB via Wi-Fi)") { viewModel.acceptModelDownload() }
-            Button("Not Now", role: .cancel) { viewModel.declineModelDownload() }
-        } message: {
-            Text("WhisperKit improves accuracy for non-native English speakers (Italian, Indian, Latino accents). Requires Wi-Fi. Download happens once in the background.")
-        }
         .sheet(isPresented: $showEngineSettings) {
             NavigationStack { EnginePreferenceView(viewModel: viewModel) }
                 .frame(minWidth: 360, idealWidth: 420, minHeight: 280, idealHeight: 340)
                 .preferredColorScheme(.dark)
         }
         .translationTask(translationConfig) { session in
-            guard let requests = viewModel.translationRequests else {
-                viewLogger.warning("⚠️ [UI] .translationTask fired but translationRequests is nil")
-                return
-            }
-            await MainActor.run { viewModel.translatorState = .downloadingModel }
-            do {
-                try await session.prepareTranslation()
-            } catch {
-                viewLogger.error("❌ [UI] prepareTranslation failed: \(error.localizedDescription)")
-                await MainActor.run {
-                    viewModel.translatorState = .modelUnavailable
-                    viewModel.errorMessage = "The Spanish translation model could not be downloaded. Go to Settings → General → Offline Content → Translation."
-                    viewModel.hasError = true
-                }
-                return
-            }
-            await MainActor.run {
-                if viewModel.translatorState == .downloadingModel { viewModel.translatorState = .idle }
-            }
-            viewLogger.info("🚀 [UI] Translation engine active")
-            var seq = 0
-            for await request in requests {
-                guard request.text.trimmingCharacters(in: .whitespaces).count > 2 else { continue }
-                let id = seq; seq += 1
-                let t0 = Date()
-                viewLogger.info("[TRANSLATE-START id=\(id)] '\(request.text)'")
-                do {
-                    let response = try await session.translate(request.text)
-                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                    let translated = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    viewLogger.info("[TRANSLATE-DONE id=\(id) ms=\(ms)] '\(translated)'")
-                    await MainActor.run {
-                        viewModel.appendTranslation(translated, sourceConfidence: request.sourceConfidence)
-                    }
-                } catch {
-                    viewLogger.error("❌ [UI] Translation error: \(error.localizedDescription)")
-                    if error.localizedDescription.lowercased().contains("model") ||
-                       error.localizedDescription.lowercased().contains("download") {
-                        await MainActor.run {
-                            viewModel.translatorState = .modelUnavailable
-                            viewModel.errorMessage = "The Spanish translation model is no longer available. Go to Settings → General → Offline Content → Translation."
-                            viewModel.hasError = true
-                        }
-                    } else if error.localizedDescription.contains("interrupted") {
-                        await MainActor.run { viewModel.stopRecording() }
-                    }
-                }
-            }
-            viewLogger.info("🏁 [UI] Translation stream closed")
+            await runTranslationLoop(session: session)
         }
         .id(taskID)
         .onChange(of: viewModel.isRecording) { _, isRecording in
@@ -175,9 +121,6 @@ struct LiveTranscriptionView: View {
                 translationConfig = nil
             }
         }
-        .onChange(of: viewModel.modelInstallState) { _, state in
-            if case .awaitingConsent = state { showWhisperConsent = true }
-        }
         .sheet(isPresented: $showHistory) {
             NavigationStack {
                 ConversationHistoryView(viewModel: historyViewModel)
@@ -188,29 +131,31 @@ struct LiveTranscriptionView: View {
         .preferredColorScheme(.dark)
     }
 
-    // MARK: - Download progress banner
+    // MARK: - Suspension banner
 
+    /// Shown while capture is paused by a system sound, a call, or a device change. It says the
+    /// session will resume by itself, because it will — including when the user never touches
+    /// the alarm or the incoming call.
     @ViewBuilder
-    private func asmrDownloadBanner(progress: Double) -> some View {
-        VStack(spacing: 4) {
-            HStack {
-                Image(systemName: "arrow.down.circle.fill").foregroundStyle(.blue)
-                Text("Downloading WhisperKit model…")
-                    .font(.system(size: 12, weight: .medium))
-                Spacer()
-                Text("\(Int(progress * 100))%")
-                    .font(.system(size: 11, weight: .semibold))
+    private func suspensionBanner(reason: AudioInterruptionReason) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recording paused")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(reason.userFacingMessage)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-            ProgressView(value: progress)
-                .tint(.blue)
+            Spacer()
+            ProgressView().controlSize(.small)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.top, 8)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, 60)
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
@@ -269,6 +214,9 @@ struct LiveTranscriptionView: View {
         case .modelUnavailable: return "Translation Model Unavailable"
         case .downloadingModel: return "Downloading Model"
         case .downloadingASRModel: return "Downloading ASR Model"
+        // Never surfaces as an alert — the banner handles it — but the case must be honest if
+        // it ever reaches here. This is exactly what used to be titled "Permission Required".
+        case .suspendedByAudioInterruption: return "Recording Paused"
         default: return "Error"
         }
     }

@@ -12,12 +12,17 @@ import OSLog
 final class DependencyContainer {
     private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Container")
 
+    // MARK: - Cross-cutting
+
+    private let telemetry: any PipelineTelemetryProtocol
+
     // MARK: - Speech pipeline
 
-    private let speechListener: ContinuousSpeechListener
     private let qualityMetrics: QualityMetricsService
     let downloadCoordinator: BackgroundAssetsCoordinator
     private let correctorService: TranscriptCorrectorService
+    private let audioSessionCoordinator: AudioSessionCoordinator
+    private let audioCapture: AudioCaptureSession
     private let speechEngine: any SpeechEngineProtocol
     private let speechRepository: SpeechRepositoryProtocol
     private let nlpSegmenter: NLPSegmenterServiceProtocol
@@ -36,45 +41,54 @@ final class DependencyContainer {
     private let historyViewModel: ConversationHistoryViewModel
 
     init() {
+        // Built first: everything downstream reports through it.
+        let sink = PipelineTelemetry()
+        telemetry = sink
+
         let metrics = QualityMetricsService()
         qualityMetrics = metrics
-
-        let listener = ContinuousSpeechListener(qualityMetrics: metrics)
-        speechListener = listener
 
         let coordinator = BackgroundAssetsCoordinator()
         downloadCoordinator = coordinator
 
-        // Synchronous engine selection via persisted install flag (data-model.md §4.1).
+        // MARK: Audio ownership
+        // One owner for the audio session, one for the engine and its tap. Previously each
+        // speech engine configured AVAudioSession itself — inconsistently — and a loose
+        // observer in this file handled only the start of an interruption.
+        let requestBox = RecognitionRequestBox()
+        let ringBuffer = AudioRingBuffer(capacitySeconds: 1.5)
+        let sessionCoordinator = AudioSessionCoordinator(telemetry: sink)
+        audioSessionCoordinator = sessionCoordinator
+        let capture = AudioCaptureSession(telemetry: sink,
+                                          requestBox: requestBox,
+                                          ringBuffer: ringBuffer)
+        audioCapture = capture
+
+        // MARK: Engine selection (008 decision Q1)
+        // The local WhisperKit engine is withdrawn in this phase: it re-processed the whole
+        // accumulated session on every 2-second window (unbounded cost) and marked every result
+        // as a hypothesis, so nothing ever reached the translation layer. Its redesign belongs
+        // to a later phase. `whisperPreferred` is retained as a stored value — users have it
+        // saved — but resolves to the Apple route.
         let preference = EnginePreference.fromUserDefaults()
-        let isWhisperInstalled = UserDefaults.standard.bool(forKey: BackgroundAssetsCoordinator.installedKey)
-
-        let engine: any SpeechEngineProtocol
-        switch preference {
-        case .appleOnly:
-            engine = AppleSpeechAnalyzerEngine()
-            logger.info("[Container] engine=AppleSpeechAnalyzer (user forced)")
-        case .auto, .whisperPreferred:
-            if DeviceCapabilities.supportsA17Pro && isWhisperInstalled {
-                engine = WhisperKitEngine()
-                logger.info("[Container] engine=WhisperKitTurbo")
-            } else {
-                engine = LegacySFSpeechEngine(listener: listener)
-                logger.info("[Container] engine=LegacySFSpeech (fallback)")
-            }
+        if !preference.isAvailable {
+            logger.notice("[Container] preference=\(preference.rawValue, privacy: .public) is withdrawn in this build; using the Apple route")
         }
+        let engine = AppleSFSpeechEngine(telemetry: sink,
+                                         capture: capture,
+                                         requestBox: requestBox,
+                                         ringBuffer: ringBuffer,
+                                         sessionCoordinator: sessionCoordinator)
         speechEngine = engine
+        // Canonical, unambiguous engine-selection line for on-device diagnostics.
+        logger.info("[Container] engine=\(engine.engineId.rawValue, privacy: .public)")
 
-        // Corrector: A17 Pro+ + iOS 26 only
-        let corrector: (any TranscriptCorrectorProtocol)?
-        if DeviceCapabilities.supportsA17Pro {
-            if #available(iOS 26.0, *) {
-                corrector = FoundationModelsCorrector()
-            } else { corrector = nil }
-        } else { corrector = nil }
+        // Corrector: A17 Pro+ only (iOS 26 is the deployment target, so no availability branch).
+        let corrector: (any TranscriptCorrectorProtocol)? =
+            DeviceCapabilities.supportsA17Pro ? FoundationModelsCorrector() : nil
         correctorService = TranscriptCorrectorService(corrector: corrector)
 
-        let segmenter = NLPSegmenterService(qualityMetrics: metrics)
+        let segmenter = NLPSegmenterService(qualityMetrics: metrics, telemetry: sink)
         nlpSegmenter = segmenter
         speechRepository = SpeechRepository(engine: engine, qualityMetrics: metrics)
         transcribeUseCase = TranscribeAudioUseCase(
@@ -90,41 +104,26 @@ final class DependencyContainer {
         }
         let convRepo = ConversationRepository(context: modelContainer.mainContext)
         conversationRepository = convRepo
-        saveConversationUseCase = SaveConversationUseCase(repository: convRepo)
+        saveConversationUseCase = SaveConversationUseCase(repository: convRepo, telemetry: sink)
         fetchConversationsUseCase = FetchConversationsUseCase(repository: convRepo)
 
         historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase)
         transcriptionViewModel = TranscriptionViewModel(
             transcribeUseCase: transcribeUseCase,
             saveConversationUseCase: saveConversationUseCase,
-            downloadCoordinator: coordinator
+            downloadCoordinator: coordinator,
+            audioSessionCoordinator: sessionCoordinator,
+            telemetry: sink
         )
-
-        setupInterruptionObserver()
     }
 
     @MainActor func makeTranscriptionViewModel() -> TranscriptionViewModel { transcriptionViewModel }
     @MainActor func makeHistoryViewModel() -> ConversationHistoryViewModel { historyViewModel }
 
-    // MARK: - SC-010 failure injection (T050)
+    /// Telemetry sink for the app shell (scene-phase reporting).
+    func makeTelemetry() -> any PipelineTelemetryProtocol { telemetry }
 
-    private func setupInterruptionObserver() {
-        #if os(iOS)
-        NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: nil, queue: .main
-        ) { [weak self] note in
-            let typeVal = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
-            guard typeVal == AVAudioSession.InterruptionType.began.rawValue else { return }
-            Task { @MainActor [weak self] in
-                self?.transcriptionViewModel.handleAudioInterruption()
-                self?.logger.warning("[Container] SC-010: audio interrupted → permissionDenied")
-            }
-        }
-        #endif
-    }
-
-    // MARK: - SessionQualityRecord pruning (T052)
+    // MARK: - SessionQualityRecord pruning
 
     func saveAndPruneQualityRecord(_ record: SessionQualityRecord) throws {
         let context = modelContainer.mainContext

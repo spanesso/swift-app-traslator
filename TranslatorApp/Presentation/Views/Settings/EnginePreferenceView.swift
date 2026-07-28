@@ -2,8 +2,12 @@
 //  EnginePreferenceView.swift
 //  TranslatorApp
 //
-//  Engine selection UI: Auto / Apple SpeechAnalyzer / WhisperKit.
-//  Presented as a sheet from LiveTranscriptionView.
+//  Engine selection UI. Presented as a sheet from LiveTranscriptionView.
+//
+//  008 (US4): the on-device WhisperKit engine is withdrawn in this build. It is shown as
+//  unavailable, with the reason, rather than offered as a choice that silently fails — which is
+//  what it was: it re-processed the whole accumulated session every two seconds and marked
+//  every result as a hypothesis, so nothing ever reached the translation layer.
 //
 
 import SwiftUI
@@ -11,14 +15,27 @@ import SwiftUI
 struct EnginePreferenceView: View {
     var viewModel: TranscriptionViewModel
 
+    private var availablePreferences: [EnginePreference] {
+        EnginePreference.allCases.filter(\.isAvailable)
+    }
+
+    private var withdrawnPreferences: [EnginePreference] {
+        EnginePreference.allCases.filter { !$0.isAvailable }
+    }
+
+    /// A stored preference pointing at a withdrawn engine still resolves to the Apple route.
+    private var effectivePreference: EnginePreference {
+        viewModel.enginePreference.isAvailable ? viewModel.enginePreference : .auto
+    }
+
     var body: some View {
         Form {
             Section {
                 Picker("Engine", selection: Binding(
-                    get: { viewModel.enginePreference },
+                    get: { effectivePreference },
                     set: { viewModel.saveEnginePreference($0) }
                 )) {
-                    ForEach(EnginePreference.allCases, id: \.self) { pref in
+                    ForEach(availablePreferences, id: \.self) { pref in
                         Text(pref.displayName).tag(pref)
                     }
                 }
@@ -26,61 +43,32 @@ struct EnginePreferenceView: View {
             } header: {
                 Text("Speech Recognition Engine")
             } footer: {
-                Text(footerText)
-                    .font(.caption)
+                Text(footerText).font(.caption)
+            }
+
+            if !withdrawnPreferences.isEmpty {
+                Section("Unavailable in this build") {
+                    ForEach(withdrawnPreferences, id: \.self) { pref in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(pref.displayName)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Image(systemName: "slash.circle").foregroundStyle(.secondary)
+                            }
+                            if let reason = pref.unavailableReason {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
             }
 
             Section("Device") {
                 deviceCapabilityRow
-            }
-
-            if case .awaitingConsent = viewModel.modelInstallState {
-                Section("WhisperKit Model") {
-                    HStack {
-                        Image(systemName: "arrow.down.circle")
-                            .foregroundStyle(.blue)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Ready to download").font(.subheadline)
-                            Text("~600 MB, Wi-Fi required").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Download") { viewModel.acceptModelDownload() }
-                            .buttonStyle(.borderedProminent)
-                    }
-                }
-            } else if case .downloading(let progress) = viewModel.modelInstallState {
-                Section("WhisperKit Model") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Downloading…")
-                            Spacer()
-                            Text("\(Int(progress * 100))%").foregroundStyle(.secondary)
-                        }
-                        ProgressView(value: progress).tint(.blue)
-                    }
-                }
-            } else if case .installed(let version, _) = viewModel.modelInstallState {
-                Section("WhisperKit Model") {
-                    Label("Installed (\(version))", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
-            } else if case .failed(let reason) = viewModel.modelInstallState {
-                Section("WhisperKit Model") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label(reason.userFacingMessage, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Button("Retry") { viewModel.acceptModelDownload() }
-                    }
-                }
-            } else if case .declined = viewModel.modelInstallState {
-                Section("WhisperKit Model") {
-                    HStack {
-                        Text("Download declined")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Download Now") { viewModel.acceptModelDownload() }
-                    }
-                }
             }
         }
         .navigationTitle("Engine Settings")
@@ -96,11 +84,10 @@ struct EnginePreferenceView: View {
             Image(systemName: hasA17 ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(hasA17 ? .green : .secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("A17 Pro Neural Engine")
-                    .font(.subheadline)
+                Text("A17 Pro Neural Engine").font(.subheadline)
                 Text(hasA17
-                     ? "WhisperKit and Foundation Models available"
-                     : "Apple SpeechAnalyzer only (no WhisperKit)")
+                     ? "On-device transcript correction available"
+                     : "On-device transcript correction unavailable")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -108,13 +95,11 @@ struct EnginePreferenceView: View {
     }
 
     private var footerText: String {
-        switch viewModel.enginePreference {
-        case .auto:
-            return "Automatically selects WhisperKit on A17 Pro+ when installed, otherwise uses Apple SpeechAnalyzer."
+        switch effectivePreference {
+        case .auto, .whisperPreferred:
+            return "Uses Apple on-device speech recognition. Recognition runs entirely on this device; no audio leaves it."
         case .appleOnly:
-            return "Always uses Apple SpeechAnalyzer. Lower battery use; reduced accent robustness."
-        case .whisperPreferred:
-            return "Requires A17 Pro+ and WhisperKit model (~600 MB). Best accuracy for non-native English speakers."
+            return "Always uses Apple speech recognition. Lower battery use."
         }
     }
 }
