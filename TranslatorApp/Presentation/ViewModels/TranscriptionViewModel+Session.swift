@@ -43,10 +43,19 @@ extension TranscriptionViewModel {
 
     func startRecording(preservingSession: Bool = false) {
         if !preservingSession {
+            // Anything still on screen is discarded here. By this point the previous meeting is
+            // already in the history (archived when it stopped) and the user has confirmed —
+            // this is no longer a silent one-tap destruction (010 US3, US4).
             fragments.removeAll()
             fragmentKeys.removeAll()
             nextFragmentId = 0
             sessionId = TelemetrySessionId.new()
+            isArchived = false
+            hasPersistenceFailure = false
+            pendingFragmentCount = 0
+            lastReportedBranch = nil
+            recoverableSession = nil
+            openJournal(for: sessionId)
         }
         reconciler.reset()
         lastSeenGeneration = 0
@@ -94,6 +103,23 @@ extension TranscriptionViewModel {
             self.translationRequests = nil
             self.sessionState = .idle
             self.translatorState = .idle
+            // Archive BEFORE the user can touch anything else. The meeting must not depend on
+            // them remembering to press Save (010 US3).
+            await self.archiveIfNeeded()
+        }
+    }
+
+    /// Opens the durable journal for a new meeting.
+    ///
+    /// A journal left over from a previous run is never overwritten — if one is still there the
+    /// recovery flow owns it, so we surface the problem instead of destroying evidence.
+    private func openJournal(for id: String) {
+        Task { [journal, weak self] in
+            do {
+                try await journal.beginSession(id: id)
+            } catch {
+                await MainActor.run { self?.reportPersistenceFailure(error) }
+            }
         }
     }
 
@@ -111,13 +137,18 @@ extension TranscriptionViewModel {
 
         let result = reconciler.liveTail(from: segment.text)
         currentBuffer = result.tail
-        if result.branch != .hasPrefix {
+
+        // Report only when the branch CHANGES. This used to fire on every partial — three times
+        // a second for the whole meeting — and each report split the recogniser's entire
+        // cumulative text just to count its words, on the main actor.
+        if result.branch != .hasPrefix, result.branch != lastReportedBranch {
             telemetry.uiPrefixMismatch(sessionId,
                                        branch: result.branch,
                                        committedWordCount: reconciler.committedWordCountInSession,
-                                       incomingWordCount: segment.text.split(separator: " ").count,
+                                       incomingWordCount: -1,   // full count is not worth an O(n) scan here
                                        resultingBufferChars: result.tail.count)
         }
+        lastReportedBranch = result.branch
     }
 
     func handleSpeechError(_ error: SpeechEngineError) {

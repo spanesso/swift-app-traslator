@@ -17,6 +17,9 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
     let stabilityDelayIncompleteNs: UInt64  = 2_500_000_000  // 2.5 s — grammatically open
     let longSentenceWordThreshold = 15
     let minShortPhraseWords = 2
+    /// How many words a full stop on a PARTIAL result must close before it is believed.
+    /// Below this the period is treated as recogniser noise (see the shredding guard).
+    let minWordsForTerminatorEmit = 3
     /// Hard ceiling on how long a pending tail may be withheld (008 FR-014 / SC-013).
     /// Lowered from 6 s: three seconds is the upper bound of a long rhetorical pause, and past
     /// that, holding text back is not waiting — it is losing it.
@@ -28,6 +31,10 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
 
     var committedFullText: String = ""
     var committedWordCount: Int = 0
+    /// Last few dozen committed words, kept so overlap trimming never has to look at the whole
+    /// meeting. `committedWordCount` remains the authority for position.
+    var committedTailWords: [String] = []
+    nonisolated static var committedTailLimit: Int { 40 }
     var lastSeenFullText: String = ""
     var pendingStartedAt: ContinuousClock.Instant?
     private var pendingHypothesis: SpeechSegment?
@@ -67,7 +74,9 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
         committedFullText = ""
         committedWordCount = 0
         lastSeenFullText = ""
+        committedTailWords.removeAll(keepingCapacity: true)
         pendingStartedAt = nil
+        committedTailWords.removeAll(keepingCapacity: true)
         pendingHypothesis = nil
         currentSegmentConfidence = 1.0
         lastSeenGeneration = 0
@@ -109,6 +118,7 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
             committedFullText = ""
             committedWordCount = 0
             lastSeenFullText = ""
+            committedTailWords.removeAll(keepingCapacity: true)
         }
 
         // ── THE 008 FIX (US3 / FR-013) ────────────────────────────────────────────────────
@@ -153,7 +163,16 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
             return
         }
 
-        if endsWithTerminator(tail) || segment.isFinal {
+        // ── SHREDDING GUARD (010 field report) ───────────────────────────────────────────────
+        // `segment.isFinal` is a real final result and is trusted unconditionally. A full stop
+        // on a PARTIAL is not: with difficult audio, `addsPunctuation` sprinkles periods between
+        // words, and forcing an emission on each one turned a conversation into confetti —
+        // "It's." "kind." "of." "we need." — one or two words per phrase, each sent off to be
+        // translated on its own. A translator given "of." has nothing to work with.
+        //
+        // Refusing to emit does NOT lose the words: they stay in the pending tail, join what
+        // follows, and leave through the stability timer or the 3 s ceiling.
+        if segment.isFinal || terminatorCompletesUtterance(tail) {
             cancelTimers()
             emitIfViable(tail, continuation: continuation,
                          tag: segment.isFinal ? "final" : "terminator",

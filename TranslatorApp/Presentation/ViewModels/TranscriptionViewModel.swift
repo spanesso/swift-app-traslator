@@ -24,6 +24,9 @@ final class TranscriptionViewModel {
     let downloadCoordinator: BackgroundAssetsCoordinator
     private let audioSessionCoordinator: any AudioSessionCoordinatorProtocol
     let telemetry: any PipelineTelemetryProtocol
+    /// Durable record of the meeting in progress (010). The transcript is written here the
+    /// moment it exists, so it no longer depends on the process staying alive.
+    let journal: any TranscriptJournalProtocol
 
     // MARK: - State
 
@@ -47,6 +50,17 @@ final class TranscriptionViewModel {
     var savedSuccessfully: Bool = false
     var latestSegmentConfidence: Float = 1.0
 
+    /// True once the meeting is safely in the history. Prevents a duplicate if the user also
+    /// presses Save, and lets the interface say "already saved" instead of implying otherwise.
+    var isArchived: Bool = false
+    /// Set once if the journal stops accepting writes, so the user is warned exactly once
+    /// rather than on every phrase.
+    var hasPersistenceFailure: Bool = false
+    /// A meeting left behind by a previous run, waiting for the user to recover or discard it.
+    var recoverableSession: RecoveredSession?
+    /// Raised when starting a new recording would clear content from the screen.
+    var pendingNewSessionConfirmation: Bool = false
+
     /// Kept as a derived value so existing views and `onChange` observers are unaffected.
     var isRecording: Bool { sessionState.isRecording }
     var isSuspended: Bool { sessionState.isSuspended }
@@ -60,6 +74,11 @@ final class TranscriptionViewModel {
     private var downloadStateTask: Task<Void, Never>?
     private var audioEventTask: Task<Void, Never>?
     var fragmentKeys: Set<String> = []
+    /// Kept in step with `fragments` instead of recomputed. See `pendingCount`.
+    var pendingFragmentCount: Int = 0
+    /// Last reconciliation branch reported, so the per-partial telemetry only fires on a change
+    /// instead of three times a second for the whole meeting.
+    var lastReportedBranch: PrefixBranch?
     var nextFragmentId: Int = 0
     var sessionId = "----"
 
@@ -75,14 +94,48 @@ final class TranscriptionViewModel {
          saveConversationUseCase: SaveConversationUseCase,
          downloadCoordinator: BackgroundAssetsCoordinator,
          audioSessionCoordinator: any AudioSessionCoordinatorProtocol,
-         telemetry: any PipelineTelemetryProtocol) {
+         telemetry: any PipelineTelemetryProtocol,
+         journal: any TranscriptJournalProtocol) {
         self.transcribeUseCase = transcribeUseCase
         self.saveConversationUseCase = saveConversationUseCase
         self.downloadCoordinator = downloadCoordinator
         self.audioSessionCoordinator = audioSessionCoordinator
         self.telemetry = telemetry
+        self.journal = journal
         subscribeToDownloadState()
         subscribeToAudioEvents()
+    }
+
+    // MARK: - Recovery (010 US2)
+
+    /// Looks for a meeting left behind by a previous run. Called when the interface appears.
+    func checkForRecoverableSession() async {
+        guard fragments.isEmpty, !isRecording else { return }
+        guard let recovered = await journal.pendingSession(), !recovered.isEmpty else { return }
+        recoverableSession = recovered
+        logger.notice("[ViewModel] found a recoverable session with \(recovered.fragments.count) fragment(s)")
+    }
+
+    /// Brings the recovered meeting back on screen. It behaves like any other finished session:
+    /// it can be saved and exported, and its journal stays on disk until it is.
+    func recoverPendingSession() {
+        guard let recovered = recoverableSession else { return }
+        fragments = recovered.fragments
+        fragmentKeys = Set(recovered.fragments.map { Self.dedupKey($0.sourceText) })
+        nextFragmentId = (recovered.fragments.map(\.id).max() ?? -1) + 1
+        sessionId = recovered.sessionId
+        isArchived = false
+        currentBuffer = ""
+        recoverableSession = nil
+        logger.info("[ViewModel] recovered session restored to screen")
+    }
+
+    /// Throws the recovered meeting away. Only ever reached through an explicit confirmation in
+    /// the interface (FR-012).
+    func discardPendingSession() {
+        recoverableSession = nil
+        Task { [journal] in await journal.discard() }
+        logger.notice("[ViewModel] recovered session discarded by the user")
     }
 
     // MARK: - Subscriptions
@@ -132,7 +185,38 @@ final class TranscriptionViewModel {
 
     // MARK: - Recording control
 
-    func toggleRecording() { isRecording ? stopRecording() : startRecording() }
+    /// Entry point for the record button.
+    ///
+    /// Starting a new meeting with content on screen used to wipe it with no warning — one tap,
+    /// no confirmation, no recovery. Now it asks (010 FR-019). With automatic archiving the
+    /// previous meeting is already safe, so this is a safety net rather than the last line of
+    /// defence, but the user still deserves to know their screen is about to be cleared.
+    func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else if fragments.isEmpty {
+            startRecording()
+        } else {
+            pendingNewSessionConfirmation = true
+        }
+    }
+
+    /// Called after the user confirms they want to start over.
+    func confirmStartNewSession() {
+        pendingNewSessionConfirmation = false
+        startRecording()
+    }
+
+    func cancelStartNewSession() {
+        pendingNewSessionConfirmation = false
+    }
+
+    /// Message for that confirmation, honest about whether the previous meeting is safe.
+    var newSessionConfirmationMessage: String {
+        isArchived
+            ? "The previous meeting is saved in your history. Starting a new recording will clear the screen."
+            : "The previous meeting has NOT been saved yet. Starting a new recording will discard it."
+    }
 
     /// Manual restart. The 300 ms sleep this used to contain is gone: it deterministically threw
     /// away a third of a second of audio with the engine already stopped, and the recogniser

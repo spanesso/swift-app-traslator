@@ -15,7 +15,7 @@
 
 import Foundation
 
-struct ConversationFragment: Sendable, Identifiable, Equatable {
+nonisolated struct ConversationFragment: Sendable, Identifiable, Equatable {
     /// Monotonic within the session, from 0. This IS the line index in both exported blocks.
     let id: Int
     /// English source. Non-empty after trimming. Immutable once created.
@@ -51,12 +51,12 @@ struct ConversationFragment: Sendable, Identifiable, Equatable {
 /// `.unavailable(reason)` — it is never removed and its line is never omitted. Previously an
 /// absent translation was expressed as an `append` that did not happen, which is
 /// indistinguishable from "there was nothing there".
-enum TranslationOutcome: Sendable, Equatable {
+nonisolated enum TranslationOutcome: Sendable, Equatable {
     case pending
     case translated(String)
     case unavailable(Reason)
 
-    enum Reason: String, Sendable, Equatable {
+    nonisolated enum Reason: String, Sendable, Equatable {
         /// The translation service threw.
         case failed
         /// Discarded before translating because it was too short.

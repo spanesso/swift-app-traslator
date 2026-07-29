@@ -31,6 +31,7 @@ final class DependencyContainer {
     // MARK: - Persistence
 
     let modelContainer: ModelContainer
+    private let journal: any TranscriptJournalProtocol
     private let conversationRepository: ConversationRepositoryProtocol
     private let saveConversationUseCase: SaveConversationUseCase
     private let fetchConversationsUseCase: FetchConversationsUseCase
@@ -107,13 +108,20 @@ final class DependencyContainer {
         saveConversationUseCase = SaveConversationUseCase(repository: convRepo, telemetry: sink)
         fetchConversationsUseCase = FetchConversationsUseCase(repository: convRepo)
 
+        // 010: the transcript is written to disk the moment it exists. Before this it lived only
+        // in a ViewModel array, and a force-quit, a background kill or one tap on the record
+        // button destroyed the meeting.
+        let transcriptJournal = FileTranscriptJournal()
+        journal = transcriptJournal
+
         historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase)
         transcriptionViewModel = TranscriptionViewModel(
             transcribeUseCase: transcribeUseCase,
             saveConversationUseCase: saveConversationUseCase,
             downloadCoordinator: coordinator,
             audioSessionCoordinator: sessionCoordinator,
-            telemetry: sink
+            telemetry: sink,
+            journal: transcriptJournal
         )
     }
 

@@ -24,8 +24,6 @@ struct LiveTranscriptionView: View {
     }
 
     var body: some View {
-        @Bindable var bindable = viewModel
-
         ZStack(alignment: .topTrailing) {
             GeometryReader { geometry in
                 let totalWidth = geometry.size.width
@@ -96,11 +94,7 @@ struct LiveTranscriptionView: View {
             .padding(.top, 15)
             .padding(.trailing, 5)
         }
-        .alert(alertTitle, isPresented: $bindable.hasError) {
-            Button("OK", role: .cancel) { viewModel.translatorState = .idle }
-        } message: {
-            if let error = viewModel.errorMessage { Text(error) }
-        }
+        .sessionAlerts(viewModel: viewModel)
         .sheet(isPresented: $showEngineSettings) {
             NavigationStack { EnginePreferenceView(viewModel: viewModel) }
                 .frame(minWidth: 360, idealWidth: 420, minHeight: 280, idealHeight: 340)
@@ -203,21 +197,6 @@ struct LiveTranscriptionView: View {
                     .font(.system(size: 11, weight: .medium))
             }
             .buttonStyle(.bordered)
-        }
-    }
-
-    // MARK: - Alert
-
-    private var alertTitle: String {
-        switch viewModel.translatorState {
-        case .permissionDenied: return "Permission Required"
-        case .modelUnavailable: return "Translation Model Unavailable"
-        case .downloadingModel: return "Downloading Model"
-        case .downloadingASRModel: return "Downloading ASR Model"
-        // Never surfaces as an alert — the banner handles it — but the case must be honest if
-        // it ever reaches here. This is exactly what used to be titled "Permission Required".
-        case .suspendedByAudioInterruption: return "Recording Paused"
-        default: return "Error"
         }
     }
 }

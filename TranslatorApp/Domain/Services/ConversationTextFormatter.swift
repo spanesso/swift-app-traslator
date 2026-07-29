@@ -25,8 +25,8 @@ enum ConversationTextFormatter {
     /// Separator for BOTH blocks. Not a style choice — the positional guarantee depends on it.
     nonisolated static var lineSeparator: String { "\n" }
 
-    static let englishHeader = "=== ENGLISH TRANSCRIPT ==="
-    static let spanishHeader = "=== SPANISH TRANSLATION ==="
+    nonisolated static var englishHeader: String { "=== ENGLISH TRANSCRIPT ===" }
+    nonisolated static var spanishHeader: String { "=== SPANISH TRANSLATION ===" }
 
     /// Marker for an absent translation. The line is NEVER omitted: omitting it is exactly the
     /// defect that made a missing translation indistinguishable from silence.

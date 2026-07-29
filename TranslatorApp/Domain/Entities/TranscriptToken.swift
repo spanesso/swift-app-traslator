@@ -29,7 +29,7 @@ struct TranscriptToken: Sendable, Hashable {
         self.isLocked = isLocked
     }
 
-    func locking() -> TranscriptToken {
+    nonisolated func locking() -> TranscriptToken {
         TranscriptToken(text: text, confidence: confidence,
                         startTime: startTime, endTime: endTime, isLocked: true)
     }

@@ -21,7 +21,7 @@
 
 import Foundation
 
-enum RecordingSessionState: Sendable, Equatable {
+nonisolated enum RecordingSessionState: Sendable, Equatable {
     case idle
     case active
     case suspended(AudioInterruptionReason)

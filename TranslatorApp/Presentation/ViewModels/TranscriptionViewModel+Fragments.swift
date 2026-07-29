@@ -39,11 +39,17 @@ extension TranscriptionViewModel {
         nextFragmentId += 1
         // Full session history, never trimmed (FR-012, decision carried over from feature 007).
         fragments.append(fragment)
+        pendingFragmentCount += 1
 
         // Advance the live-tail baseline. Omitting this left `committedWords` at 0 for the whole
         // session, so the green live text in the English pane was the entire cumulative
         // transcript growing without end instead of just the uncommitted tail.
         reconciler.commit(trimmed)
+
+        // Make it durable NOW (010 FR-001). Until this existed, everything above lived only in
+        // this array, and a force-quit, a background kill or one tap on the record button
+        // destroyed the meeting.
+        persist(.source(fragment, sessionId: sessionId, epochMs: Self.nowEpochMs()))
 
         translatorState = .inFlight
         telemetry.translationEnqueued(sessionId,
@@ -63,10 +69,48 @@ extension TranscriptionViewModel {
     /// never left dangling and never removed, which is what makes the line counts of the two
     /// exported blocks equal by construction (SC-020, SC-021).
     func resolveTranslation(fragmentId: Int, outcome: TranslationOutcome) {
-        guard let index = fragments.firstIndex(where: { $0.id == fragmentId }) else { return }
+        guard let index = fragmentIndex(id: fragmentId) else { return }
         guard fragments[index].isPending else { return }
         fragments[index].translation = outcome
+        pendingFragmentCount -= 1
         translatorState = pendingCount > 0 ? .inFlight : .idle
+
+        // The translation is part of the meeting too (010 FR-002). Recovering the English
+        // without the Spanish would only be half the promise.
+        if let entry = TranscriptJournalEntry.translation(fragmentId: fragmentId,
+                                                          outcome: outcome,
+                                                          sessionId: sessionId,
+                                                          epochMs: Self.nowEpochMs()) {
+            persist(entry)
+        }
+    }
+
+    // MARK: - Durability
+
+    /// Writes an entry to the journal off the main actor, and surfaces a failure rather than
+    /// swallowing it — the only thing worse than losing the text is losing it silently
+    /// (010 FR-005, FR-007).
+    func persist(_ entry: TranscriptJournalEntry) {
+        Task { [journal, weak self] in
+            do {
+                try await journal.record(entry)
+            } catch {
+                await MainActor.run { self?.reportPersistenceFailure(error) }
+            }
+        }
+    }
+
+    func reportPersistenceFailure(_ error: Error) {
+        guard !hasPersistenceFailure else { return }   // one warning per session, not a storm
+        hasPersistenceFailure = true
+        errorMessage = (error as? TranscriptJournalError)?.errorDescription
+            ?? "The transcript could not be saved to disk."
+        hasError = true
+        logger.error("[ViewModel] persistence failed: \(error.localizedDescription, privacy: .public)")
+    }
+
+    nonisolated static func nowEpochMs() -> Int {
+        Int(Date().timeIntervalSince1970 * 1000)
     }
 
     func markTranslationUnavailable(fragmentId: Int, reason: TranslationOutcome.Reason) {
@@ -79,10 +123,28 @@ extension TranscriptionViewModel {
         for index in fragments.indices where fragments[index].isPending {
             fragments[index].translation = .unavailable(.serviceUnavailable)
         }
+        pendingFragmentCount = 0
         translatorState = .modelUnavailable
     }
 
-    var pendingCount: Int { fragments.reduce(0) { $0 + ($1.isPending ? 1 : 0) } }
+    /// Maintained incrementally. It used to be a `reduce` over every fragment, called four
+    /// times per phrase plus thirty times during the stop drain — O(n) work on the main actor
+    /// that grew with the meeting.
+    var pendingCount: Int { pendingFragmentCount }
+
+    /// Fragments are appended with contiguous ids, so this is a binary search rather than the
+    /// linear `firstIndex` it replaces. It also stays correct if recovery leaves a gap.
+    func fragmentIndex(id: Int) -> Int? {
+        var low = 0
+        var high = fragments.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let candidate = fragments[mid].id
+            if candidate == id { return mid }
+            if candidate < id { low = mid + 1 } else { high = mid - 1 }
+        }
+        return nil
+    }
 
     /// Waits for in-flight translations when the user stops, then times out whatever is left.
     ///
@@ -98,6 +160,7 @@ extension TranscriptionViewModel {
         for index in fragments.indices where fragments[index].isPending {
             fragments[index].translation = .unavailable(.timedOut)
         }
+        pendingFragmentCount = 0
         if stranded > 0 {
             logger.notice("[ViewModel] drain timed out with \(stranded) fragment(s) unresolved")
         }
@@ -110,62 +173,5 @@ extension TranscriptionViewModel {
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-    }
-
-    // MARK: - Export
-
-    var exportText: String {
-        ConversationTextFormatter.exportDocument(fragments)
-    }
-
-    var exportDocument: ConversationExport {
-        ConversationExport(content: exportText,
-                           filename: "Conversation \(Self.exportDateFormatter.string(from: Date())).txt")
-    }
-
-    static var exportDateFormatter: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH-mm"
-        return formatter
-    }
-
-    // MARK: - Save
-
-    func saveConversation() async {
-        guard canSave, !isSaving else { return }
-        isSaving = true
-        defer { isSaving = false }
-
-        let english = ConversationTextFormatter.englishBlock(fragments)
-        let spanish = ConversationTextFormatter.spanishBlock(fragments)
-        let unavailable = fragments.reduce(0) { count, fragment in
-            if case .unavailable = fragment.translation { return count + 1 }
-            return count
-        }
-        telemetry.exportAlignment(sessionId,
-                                  enLines: ConversationTextFormatter.lineCount(english),
-                                  esLines: ConversationTextFormatter.lineCount(spanish),
-                                  unavailable: unavailable)
-
-        if unavailable == fragments.count && !fragments.isEmpty {
-            errorMessage = "Saved, but no phrase could be translated in this session."
-            hasError = true
-        }
-
-        do {
-            try await saveConversationUseCase.execute(englishText: english, spanishText: spanish)
-            savedSuccessfully = true
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            savedSuccessfully = false
-        } catch ConversationError.emptyTranscript {
-            errorMessage = "Nothing to save — no speech was captured."
-            hasError = true
-        } catch ConversationError.misalignedBlocks {
-            errorMessage = "Save failed: the transcript and translation are out of step."
-            hasError = true
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"
-            hasError = true
-        }
     }
 }

@@ -11,7 +11,7 @@
 
 import Foundation
 
-enum AudioInterruptionReason: String, Sendable, Equatable, CaseIterable {
+nonisolated enum AudioInterruptionReason: String, Sendable, Equatable, CaseIterable {
     /// Phone call, alarm, or voice assistant. Includes the case that matters most: an
     /// interruption the user never attends to, which must suspend the session rather than end it.
     case systemInterruption
