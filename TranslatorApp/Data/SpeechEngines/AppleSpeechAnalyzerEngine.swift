@@ -113,7 +113,7 @@ actor AppleSpeechAnalyzerEngine: SpeechEngineProtocol {
         await sessionCoordinator.setSessionId(sessionId)
         await sessionCoordinator.startObserving()
         try await sessionCoordinator.activate()
-        audioSink.install(converter)
+        audioSink.add(converter)
         try await capture.start(sessionId: sessionId)
         guard epoch == lifecycleEpoch else {
             await abandonStart()

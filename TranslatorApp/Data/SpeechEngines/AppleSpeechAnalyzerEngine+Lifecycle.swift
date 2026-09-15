@@ -32,7 +32,9 @@ extension AppleSpeechAnalyzerEngine {
         // No more audio, then tell the analyser the input is over and let it finalise what it
         // already heard — the end of the last phrase.
         await capture.stop()
-        audioSink.clear()
+        // ITS OWN consumer, not everyone's: `clear()` here also silenced the meeting-audio
+        // recorder, which outlives the engine's session by design.
+        audioSink.remove(converter)
         converter.detach()
         inputContinuation?.finish(); inputContinuation = nil
         if let analyzer, !isFinished {
@@ -59,7 +61,7 @@ extension AppleSpeechAnalyzerEngine {
         isFinished = true
         pacerTask?.cancel(); pacerTask = nil
         await capture.stop()
-        audioSink.clear()
+        audioSink.remove(converter)
         converter.detach()
         inputContinuation?.finish(); inputContinuation = nil
         if let analyzer {

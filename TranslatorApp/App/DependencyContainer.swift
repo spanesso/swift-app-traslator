@@ -33,6 +33,9 @@ final class DependencyContainer {
 
     let modelContainer: ModelContainer
     private let journal: any TranscriptJournalProtocol
+    /// The meeting's audio while it exists: recorded for diarisation and accuracy, shredded when
+    /// the user decides. Never part of a saved conversation.
+    private let meetingAudio: any MeetingAudioProtocol
     private let conversationRepository: ConversationRepositoryProtocol
     private let saveConversationUseCase: SaveConversationUseCase
     private let fetchConversationsUseCase: FetchConversationsUseCase
@@ -173,6 +176,11 @@ final class DependencyContainer {
         let transcriptJournal = FileTranscriptJournal()
         journal = transcriptJournal
 
+        // A second consumer of the same permanent tap. It shares the tap and nothing else: whether
+        // audio is being written has no effect on recognition.
+        let audioStore = MeetingAudioStore(sink: bufferSink, telemetry: sink)
+        meetingAudio = audioStore
+
         historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase,
                                                         openUseCase: openConversationUseCase)
         transcriptionViewModel = TranscriptionViewModel(
@@ -182,6 +190,7 @@ final class DependencyContainer {
             audioSessionCoordinator: sessionCoordinator,
             telemetry: sink,
             journal: transcriptJournal,
+            meetingAudio: audioStore,
             levelMonitor: monitor
         )
     }

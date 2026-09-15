@@ -87,6 +87,9 @@ extension TranscriptionViewModel {
             try await saveConversationUseCase.execute(englishText: english, spanishText: spanish)
             isArchived = true
             await journal.discard()
+            // The saved conversation is its text, sealed. The audio has done its job and does not
+            // become part of the archive.
+            await shredMeetingAudio(of: sessionId)
             if unavailable == fragments.count {
                 errorMessage = "Saved, but no phrase could be translated in this session."
                 hasError = true
@@ -132,7 +135,33 @@ extension TranscriptionViewModel {
         nextFragmentId = 0
         currentBuffer = ""
         isArchived = false
-        Task { [journal] in await journal.discard() }
+        let discardedSessionId = sessionId
+        Task { [journal, meetingAudio] in
+            await journal.discard()
+            await meetingAudio.shred(sessionId: discardedSessionId)
+        }
         logger.notice("[ViewModel] meeting discarded by the user")
+    }
+
+    // MARK: - Starting over
+
+    /// Called after the user confirms they want to start over.
+    func confirmStartNewSession() {
+        pendingNewSessionConfirmation = false
+        // The confirmation told the user an unsaved meeting would be discarded. Its journal has
+        // to go with it; left on disk, the new meeting could not open its own and was written
+        // into the old one (research 2026-09-15, P9).
+        startRecording(discardingUnsavedJournal: !isArchived)
+    }
+
+    func cancelStartNewSession() {
+        pendingNewSessionConfirmation = false
+    }
+
+    /// Message for that confirmation, honest about whether the previous meeting is safe.
+    var newSessionConfirmationMessage: String {
+        isArchived
+            ? "This meeting is saved and encrypted in your history. Starting a new recording will clear the screen."
+            : "This meeting has not been saved. Save it (encrypted) or discard it before starting a new recording."
     }
 }

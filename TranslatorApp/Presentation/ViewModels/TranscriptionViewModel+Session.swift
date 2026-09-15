@@ -88,6 +88,10 @@ extension TranscriptionViewModel {
         let epoch = sessionEpoch
         transcriptionTask = Task { [weak self] in
             guard let self else { return }
+            // Before the pipeline, and awaited: the tap starts inside `executeBoth`, so opening the
+            // file afterwards would cost the first seconds of the meeting. A restart that preserves
+            // the session keeps writing to the file it already has.
+            if !preservingSession { await self.beginMeetingAudio() }
             do {
                 let (rawStream, stableStream) = try await self.transcribeUseCase.executeBoth()
                 let uiTask = Task { @MainActor [weak self] in

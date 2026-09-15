@@ -18,7 +18,12 @@ extension TranscriptionViewModel {
     /// Looks for a meeting left behind by a previous run. Called when the interface appears.
     func checkForRecoverableSession() async {
         guard fragments.isEmpty, !isRecording else { return }
-        guard let recovered = await journal.pendingSession(), !recovered.isEmpty else { return }
+        let pending = await journal.pendingSession()
+        let recoverable = (pending?.isEmpty == false) ? pending : nil
+        // Audio a crash left behind outlives its meeting otherwise. The one meeting the user has
+        // still to decide about keeps its own.
+        await shredOrphanedAudio(keeping: recoverable?.sessionId)
+        guard let recovered = recoverable else { return }
         recoverableSession = recovered
         logger.notice("[ViewModel] found a recoverable session with \(recovered.fragments.count) fragment(s)")
     }
@@ -71,8 +76,12 @@ extension TranscriptionViewModel {
     /// the interface (FR-012).
     func discardPendingSession() {
         pendingRecoveryDiscardConfirmation = false
+        let discardedSessionId = recoverableSession?.sessionId
         recoverableSession = nil
-        Task { [journal] in await journal.discard() }
+        Task { [journal, meetingAudio] in
+            await journal.discard()
+            if let discardedSessionId { await meetingAudio.shred(sessionId: discardedSessionId) }
+        }
         logger.notice("[ViewModel] recovered session discarded by the user")
     }
 }

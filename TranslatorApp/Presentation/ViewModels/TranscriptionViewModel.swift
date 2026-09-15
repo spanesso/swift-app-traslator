@@ -27,6 +27,9 @@ final class TranscriptionViewModel {
     /// Durable record of the meeting in progress (010). The transcript is written here the
     /// moment it exists, so it no longer depends on the process staying alive.
     let journal: any TranscriptJournalProtocol
+    /// The meeting's audio while the user has not decided yet (TranscriptionViewModel+Audio.swift).
+    /// Recorded for diarisation and accuracy measurement, shredded when they save or discard.
+    let meetingAudio: any MeetingAudioProtocol
     /// Live input level. Reading it is how the user finds out, DURING the meeting, that a quiet
     /// speaker is not reaching the microphone — instead of discovering the gap afterwards.
     let levelMonitor: AudioLevelMonitor
@@ -146,6 +149,7 @@ final class TranscriptionViewModel {
          audioSessionCoordinator: any AudioSessionCoordinatorProtocol,
          telemetry: any PipelineTelemetryProtocol,
          journal: any TranscriptJournalProtocol,
+         meetingAudio: any MeetingAudioProtocol,
          levelMonitor: AudioLevelMonitor) {
         self.transcribeUseCase = transcribeUseCase
         self.saveConversationUseCase = saveConversationUseCase
@@ -153,6 +157,7 @@ final class TranscriptionViewModel {
         self.audioSessionCoordinator = audioSessionCoordinator
         self.telemetry = telemetry
         self.journal = journal
+        self.meetingAudio = meetingAudio
         self.levelMonitor = levelMonitor
         subscribeToDownloadState()
         subscribeToAudioEvents()
@@ -228,23 +233,6 @@ final class TranscriptionViewModel {
         }
     }
 
-    /// Called after the user confirms they want to start over.
-    func confirmStartNewSession() {
-        pendingNewSessionConfirmation = false
-        // The confirmation told the user an unsaved meeting would be discarded. Its journal has
-        // to go with it; left on disk, the new meeting could not open its own and was written
-        // into the old one (research 2026-09-15, P9).
-        startRecording(discardingUnsavedJournal: !isArchived)
-    }
-
-    func cancelStartNewSession() {
-        pendingNewSessionConfirmation = false
-    }
-
-    /// Message for that confirmation, honest about whether the previous meeting is safe.
-    var newSessionConfirmationMessage: String {
-        isArchived
-            ? "This meeting is saved and encrypted in your history. Starting a new recording will clear the screen."
-            : "This meeting has not been saved. Save it (encrypted) or discard it before starting a new recording."
-    }
+    // Answering that confirmation is a decision about the meeting that just ended, so it lives with
+    // the others in TranscriptionViewModel+Archive.swift.
 }

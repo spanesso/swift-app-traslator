@@ -72,6 +72,8 @@ struct TelemetryEvent: Sendable {
         case speechModel         = "SPEECH_MODEL"
         /// The app asked SpeechAnalyzer to finalise what it has heard so far.
         case analyzerFinalize    = "ANALYZER_FINALIZE"
+        /// The meeting's audio file being recorded, closed or shredded. Sizes only, never audio.
+        case meetingAudio        = "MEETING_AUDIO"
 
         // Audio continuity (FR-003)
         case audioGap            = "AUDIO_GAP"

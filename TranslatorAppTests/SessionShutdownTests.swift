@@ -58,6 +58,47 @@ actor InMemoryTranscriptJournal: TranscriptJournalProtocol {
     func discard() async { calls.append("discard"); entries.removeAll() }
 }
 
+/// Records what happens to the meeting's audio without touching a disk. Lock-protected rather than
+/// an actor so a test can read it from the synchronous `waitUntil` predicate.
+nonisolated final class SpyMeetingAudio: MeetingAudioProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var begunSessions: [String] = []
+    private var closedFiles = 0
+    private var shreddedSessions: [String] = []
+    private var keptAtLaunch: [String?] = []
+
+    nonisolated var began: [String] { lock.lock(); defer { lock.unlock() }; return begunSessions }
+    nonisolated var finished: Int { lock.lock(); defer { lock.unlock() }; return closedFiles }
+    nonisolated var shredded: [String] { lock.lock(); defer { lock.unlock() }; return shreddedSessions }
+    nonisolated var kept: [String?] { lock.lock(); defer { lock.unlock() }; return keptAtLaunch }
+
+    func beginSession(id: String) async {
+        lock.lock(); begunSessions.append(id); lock.unlock()
+    }
+
+    func finishSession() async -> MeetingAudioRecording? {
+        lock.lock()
+        closedFiles += 1
+        let id = begunSessions.last
+        lock.unlock()
+        guard let id else { return nil }
+        return MeetingAudioRecording(sessionId: id,
+                                     url: URL(fileURLWithPath: "/dev/null"),
+                                     durationMs: 1_000,
+                                     bytes: 32_000)
+    }
+
+    func recording(for sessionId: String) async -> MeetingAudioRecording? { nil }
+
+    func shred(sessionId: String) async {
+        lock.lock(); shreddedSessions.append(sessionId); lock.unlock()
+    }
+
+    func shredEverything(except sessionId: String?) async {
+        lock.lock(); keptAtLaunch.append(sessionId); lock.unlock()
+    }
+}
+
 final class FakeConversationRepository: ConversationRepositoryProtocol, @unchecked Sendable {
     private(set) var saved: [ConversationEntity] = []
     func save(_ conversation: ConversationEntity) async throws { saved.append(conversation) }
@@ -78,7 +119,8 @@ final class SessionShutdownTests: XCTestCase {
 
     private func makeViewModel(repository: FakeSpeechRepository,
                                journal: InMemoryTranscriptJournal = InMemoryTranscriptJournal(),
-                               conversations: FakeConversationRepository = FakeConversationRepository())
+                               conversations: FakeConversationRepository = FakeConversationRepository(),
+                               audio: SpyMeetingAudio = SpyMeetingAudio())
         -> TranscriptionViewModel {
         let telemetry = NoopPipelineTelemetry()
         let metrics = QualityMetricsService()
@@ -95,6 +137,7 @@ final class SessionShutdownTests: XCTestCase {
             audioSessionCoordinator: FakeAudioSessionCoordinator(),
             telemetry: telemetry,
             journal: journal,
+            meetingAudio: audio,
             levelMonitor: AudioLevelMonitor())
     }
 
@@ -106,6 +149,36 @@ final class SessionShutdownTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         return condition()
+    }
+
+    // MARK: - The meeting's audio lasts exactly as long as the user's decision
+
+    /// The audio is recorded with the meeting, survives the stop — diarisation has not run yet — and
+    /// stops existing the moment the user discards it. Nothing automatic keeps it beyond that.
+    func testAudioIsRecordedKeptAtStopAndShreddedWhenDiscarded() async {
+        let repository = FakeSpeechRepository()
+        let audio = SpyMeetingAudio()
+        let viewModel = makeViewModel(repository: repository, audio: audio)
+
+        viewModel.startRecording()
+        let session = viewModel.sessionId
+
+        let recordingStarted = await waitUntil(timeoutMs: 2_000) { !audio.began.isEmpty }
+        XCTAssertTrue(recordingStarted, "the audio must start with the meeting, not after it")
+        XCTAssertEqual(audio.began, [session])
+
+        viewModel.stopRecording()
+        let stopped = await waitUntil(timeoutMs: 5_000) { viewModel.sessionState == .idle }
+        XCTAssertTrue(stopped)
+
+        XCTAssertEqual(audio.finished, 1, "the file must be closed when the recording ends")
+        XCTAssertTrue(audio.shredded.isEmpty,
+                      "stopping is not deciding: the audio is what the speakers get told apart from")
+
+        viewModel.discardConversation()
+        let gone = await waitUntil(timeoutMs: 2_000) { !audio.shredded.isEmpty }
+        XCTAssertTrue(gone, "discarding the meeting must take its audio with it")
+        XCTAssertEqual(audio.shredded, [session])
     }
 
     // MARK: - P1: stopping must not lose the phrase in progress

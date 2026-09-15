@@ -35,6 +35,9 @@ extension TranscriptionViewModel {
             guard let self else { return }
             await self.transcribeUseCase.stop()
             await TaskCompletion.wait(for: consumer, upToMs: Self.shutdownFlushBudgetMs)
+            // The tap is stopped by now, so the file is complete. Closed here and NOT deleted: it is
+            // what the speakers will be told apart from, and it goes when the user decides.
+            await self.finishMeetingAudio()
             // The last phrase is committed by now; a draft still scheduled would only repeat it.
             self.resetDraft()
             // Shutting the engine down takes time, and the user can start a new meeting while it
@@ -100,6 +103,7 @@ extension TranscriptionViewModel {
         stopLevelPolling()
         Task { [weak self] in
             guard let self, self.sessionEpoch == epoch else { return }
+            await self.finishMeetingAudio()
             await self.drainPendingTranslations()
             guard self.sessionEpoch == epoch else { return }
             await self.meetingDidEnd()
