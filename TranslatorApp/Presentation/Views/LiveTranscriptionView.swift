@@ -31,6 +31,7 @@ struct LiveTranscriptionView: View {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 8) {
                         headerView(title: "ORIGINAL (EN)", icon: "microphone.fill", color: .yellow)
+                        inputLevelMeter()
                         englishPane()
                     }
                     .frame(width: totalWidth * 0.35)
@@ -58,6 +59,8 @@ struct LiveTranscriptionView: View {
             // replaces the "Permission Required" alert every interruption used to raise.
             if let reason = viewModel.suspensionReason {
                 suspensionBanner(reason: reason)
+            } else if viewModel.hasUnsavedMeeting {
+                unsavedMeetingBanner
             }
 
             // Sidebar buttons
@@ -79,6 +82,8 @@ struct LiveTranscriptionView: View {
                 RecordButton(isRecording: viewModel.isRecording) {
                     viewModel.toggleRecording()
                 }
+                // Until the last meeting has delivered its last phrase.
+                .disabled(viewModel.sessionState == .stopping)
 
                 if viewModel.isRecording {
                     Button { viewModel.restartListening() } label: {
@@ -93,6 +98,8 @@ struct LiveTranscriptionView: View {
             }
             .padding(.top, 15)
             .padding(.trailing, 5)
+
+            translationTaskHost
         }
         .sessionAlerts(viewModel: viewModel)
         .sheet(isPresented: $showEngineSettings) {
@@ -100,22 +107,25 @@ struct LiveTranscriptionView: View {
                 .frame(minWidth: 360, idealWidth: 420, minHeight: 280, idealHeight: 340)
                 .preferredColorScheme(.dark)
         }
-        .translationTask(translationConfig) { session in
-            await runTranslationLoop(session: session)
-        }
-        .id(taskID)
-        .onChange(of: viewModel.isRecording) { _, isRecording in
-            if isRecording {
-                taskID = UUID()
-                translationConfig = .init(
-                    source: .init(identifier: "en-US"),
-                    target: .init(identifier: "es-ES")
-                )
-            } else {
+        // Follows the STREAM, not the record button. Keyed on `isRecording`, a manual restart —
+        // which swaps the stream without ever leaving the recording state — left the new stream
+        // with no consumer, and every phrase from that tap onwards sat on "Translating…" for the
+        // rest of the meeting with nothing reported anywhere.
+        .onChange(of: viewModel.translationStreamId) { _, streamId in
+            guard streamId != nil else {
                 translationConfig = nil
+                return
             }
+            // ORDER IS LOAD-BEARING: the id rotates FIRST so SwiftUI destroys the previous
+            // `.translationTask` subtree before the new configuration starts a task.
+            taskID = UUID()
+            translationConfig = .init(
+                source: .init(identifier: "en-US"),
+                target: .init(identifier: "es-ES")
+            )
         }
-        .sheet(isPresented: $showHistory) {
+        // The decrypted conversation goes as soon as the history is dismissed.
+        .sheet(isPresented: $showHistory, onDismiss: { historyViewModel.closeConversation() }) {
             NavigationStack {
                 ConversationHistoryView(viewModel: historyViewModel)
             }
@@ -123,6 +133,24 @@ struct LiveTranscriptionView: View {
             .preferredColorScheme(.dark)
         }
         .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Translation task host
+
+    /// Invisible node that owns the translation consumer.
+    ///
+    /// The rotating `.id` used to sit on the whole screen, so every restart of the consumer also
+    /// rebuilt both panes, reset their scroll position and re-ran the recovery check. Nothing
+    /// about that was needed: only the `.translationTask` subtree has to be destroyed.
+    private var translationTaskHost: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .translationTask(translationConfig) { session in
+                await runTranslationLoop(session: session)
+            }
+            .id(taskID)
     }
 
     // MARK: - Suspension banner
@@ -171,32 +199,5 @@ struct LiveTranscriptionView: View {
             .background(Color.blue.opacity(0.25))
             .clipShape(Capsule())
             .foregroundStyle(.blue)
-    }
-
-    // MARK: - Session actions
-
-    @ViewBuilder
-    private var sessionActionsView: some View {
-        if viewModel.canSave {
-            Button {
-                Task { await viewModel.saveConversation() }
-            } label: {
-                Label(
-                    viewModel.savedSuccessfully ? "Saved!" : "Save",
-                    systemImage: viewModel.savedSuccessfully ? "checkmark.circle.fill" : "square.and.arrow.down"
-                )
-                .font(.system(size: 11, weight: .medium))
-            }
-            .disabled(viewModel.isSaving)
-            .buttonStyle(.borderedProminent)
-            .tint(viewModel.savedSuccessfully ? .green : .blue)
-
-            ShareLink(item: viewModel.exportDocument,
-                      preview: SharePreview(viewModel.exportDocument.filename)) {
-                Label("Export", systemImage: "square.and.arrow.up")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-        }
     }
 }

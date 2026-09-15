@@ -62,12 +62,25 @@ struct TelemetryEvent: Sendable {
         case restartEnd          = "RESTART_END"
         case restartFailedFatal  = "RESTART_FAILED_FATAL"
         case watchdogFired       = "WATCHDOG_FIRED"
+        /// The recogniser stopped producing text while the microphone was still carrying speech.
+        /// Not an error and not a pause — it is the state where the app looks broken to the user
+        /// and every other signal says everything is fine.
+        case recognizerDeaf      = "RECOGNIZER_DEAF"
 
         // Audio continuity (FR-003)
         case audioGap            = "AUDIO_GAP"
         case tapSwap             = "TAP_SWAP"
         case tapFirstBuffer      = "TAP_FIRST_BUFFER"
         case ringBufferState     = "RINGBUFFER_STATE"
+        /// The tap stopped receiving buffers altogether (or started again). Not silence: a quiet
+        /// room still delivers buffers.
+        case tapStall            = "TAP_STALL"
+
+        // Device health
+        /// Thermal state and memory available before the system terminates the app.
+        case resources           = "RESOURCES"
+        /// iOS warned the app about memory. The next thing may be a termination with no warning.
+        case memoryWarning       = "MEMORY_WARNING"
 
         // Segmentation and endpointing (FR-004)
         case stabilityArmed      = "STAB_ARMED"
@@ -84,6 +97,10 @@ struct TelemetryEvent: Sendable {
         case translationFailed   = "TR_FAILED"
         case translationSkipped  = "TR_SKIPPED"
         case translationDedup    = "TR_DEDUP_DROP"
+        /// A translation still in flight past the point where anything is plausibly still
+        /// working. The queue is serial, so one stuck call silently freezes the Spanish pane
+        /// for the rest of the meeting — this turns that into something observable.
+        case translationStalled  = "TR_STALLED"
 
         // Audio session (FR-006)
         case audioInterruption   = "AUDIO_INTERRUPTION"
@@ -110,10 +127,57 @@ struct TelemetryEvent: Sendable {
 
 enum SessionEndReason: String, Sendable {
     case isFinal, error, userStop, watchdog, interruption
+    /// The recogniser reported that nobody was speaking. Normal in a meeting with pauses, and
+    /// deliberately NOT `error`: counting it as a failure buried the real ones in the log and
+    /// inflated the restart count with the rhythm of the conversation.
+    case noSpeech
+    /// We cancelled the request ourselves. Also not a failure.
+    case cancelled
 }
 
 enum RestartTrigger: String, Sendable {
-    case isFinal, error, watchdog, manual, routeChange, configChange
+    case isFinal, error, watchdog, manual, routeChange, configChange, noSpeech, cancelled
+    /// Rotated because the recogniser had gone silent with speech-level audio still arriving.
+    case deaf
+}
+
+/// How a recognition error should be read.
+///
+/// The engine used to compare the error against nil and nothing else, so a pause, a
+/// cancellation and a genuine failure were indistinguishable — which is why no field report
+/// could be diagnosed.
+nonisolated enum RecognitionFailureKind: Sendable, Equatable {
+    case noSpeech
+    case cancelled
+    case failure
+
+    /// Apple's speech errors arrive in `kAFAssistantErrorDomain`. 1110 is "no speech detected";
+    /// 216 and 301 are cancellations, which we cause ourselves on every rotation.
+    nonisolated static func classify(domain: String?, code: Int?) -> RecognitionFailureKind? {
+        guard let domain, let code else { return nil }
+        guard domain == "kAFAssistantErrorDomain" else { return .failure }
+        switch code {
+        case 1110:      return .noSpeech
+        case 216, 301:  return .cancelled
+        default:        return .failure
+        }
+    }
+
+    nonisolated var sessionEndReason: SessionEndReason {
+        switch self {
+        case .noSpeech:  return .noSpeech
+        case .cancelled: return .cancelled
+        case .failure:   return .error
+        }
+    }
+
+    nonisolated var restartTrigger: RestartTrigger {
+        switch self {
+        case .noSpeech:  return .noSpeech
+        case .cancelled: return .cancelled
+        case .failure:   return .error
+        }
+    }
 }
 
 enum RestartOutcome: String, Sendable { case ok, failed }

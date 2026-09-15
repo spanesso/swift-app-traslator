@@ -38,7 +38,8 @@ actor FoundationModelsCorrector: TranscriptCorrectorProtocol {
         }
 
         if let rejection = validateInvariants(original: segment, corrected: correctedText) {
-            logger.warning("[CORRECTOR] rejected: \(rejection.rawValue) | original='\(segment.text)' corrected='\(correctedText)'")
+            // Counts only: the conversation never goes into a log.
+            logger.warning("[CORRECTOR] rejected: \(rejection.rawValue) | chars \(segment.text.count) → \(correctedText.count)")
             return CorrectionResult(segment: segment, action: .rejected, rejectedReason: rejection)
         }
 
@@ -46,9 +47,12 @@ actor FoundationModelsCorrector: TranscriptCorrectorProtocol {
         let correctedSegment = SpeechSegment(
             text: correctedText, isFinal: true,
             confidence: min(segment.confidence, avgConfidence(newTokens)),
-            tokens: newTokens, source: segment.source
+            tokens: newTokens, source: segment.source,
+            // Carried over: without it the corrected segment claimed generation 0, which looks
+            // like a recogniser rotation downstream and re-emitted the whole final (D4).
+            sessionGeneration: segment.sessionGeneration
         )
-        logger.info("[CORRECTOR] accepted | '\(segment.text)' → '\(correctedText)'")
+        logger.info("[CORRECTOR] accepted | chars \(segment.text.count) → \(correctedText.count)")
         return CorrectionResult(segment: correctedSegment, action: .accepted, rejectedReason: nil)
     }
 

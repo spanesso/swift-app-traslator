@@ -30,6 +30,10 @@ protocol TranscriptJournalProtocol: Sendable {
     /// True when a previous run left something recoverable. Cheap enough to call on launch.
     func hasPendingSession() async -> Bool
 
+    /// Moves a journal that exists but cannot be read out of the way — kept on disk, never
+    /// deleted — so a new meeting can open its own (durability audit 2026-09-15, R4).
+    func setAsideUnreadable() async
+
     /// Deletes the journal. Called ONLY after the meeting is safely archived, or when the user
     /// explicitly discards it (FR-012, FR-017).
     func discard() async

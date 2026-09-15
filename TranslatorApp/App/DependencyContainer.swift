@@ -23,6 +23,7 @@ final class DependencyContainer {
     private let correctorService: TranscriptCorrectorService
     private let audioSessionCoordinator: AudioSessionCoordinator
     private let audioCapture: AudioCaptureSession
+    private let levelMonitor: AudioLevelMonitor
     private let speechEngine: any SpeechEngineProtocol
     private let speechRepository: SpeechRepositoryProtocol
     private let nlpSegmenter: NLPSegmenterServiceProtocol
@@ -35,6 +36,7 @@ final class DependencyContainer {
     private let conversationRepository: ConversationRepositoryProtocol
     private let saveConversationUseCase: SaveConversationUseCase
     private let fetchConversationsUseCase: FetchConversationsUseCase
+    private let openConversationUseCase: OpenConversationUseCase
 
     // MARK: - ViewModels
 
@@ -57,12 +59,15 @@ final class DependencyContainer {
         // speech engine configured AVAudioSession itself — inconsistently — and a loose
         // observer in this file handled only the start of an interruption.
         let requestBox = RecognitionRequestBox()
-        let ringBuffer = AudioRingBuffer(capacitySeconds: 1.5)
+        let ringBuffer = AudioRingBuffer(capacitySeconds: AppleSFSpeechEngine.carryOverCapacitySeconds)
         let sessionCoordinator = AudioSessionCoordinator(telemetry: sink)
         audioSessionCoordinator = sessionCoordinator
+        let monitor = AudioLevelMonitor()
+        levelMonitor = monitor
         let capture = AudioCaptureSession(telemetry: sink,
                                           requestBox: requestBox,
-                                          ringBuffer: ringBuffer)
+                                          ringBuffer: ringBuffer,
+                                          levelMonitor: monitor)
         audioCapture = capture
 
         // MARK: Engine selection (008 decision Q1)
@@ -79,7 +84,8 @@ final class DependencyContainer {
                                          capture: capture,
                                          requestBox: requestBox,
                                          ringBuffer: ringBuffer,
-                                         sessionCoordinator: sessionCoordinator)
+                                         sessionCoordinator: sessionCoordinator,
+                                         levelMonitor: monitor)
         speechEngine = engine
         // Canonical, unambiguous engine-selection line for on-device diagnostics.
         logger.info("[Container] engine=\(engine.engineId.rawValue, privacy: .public)")
@@ -97,16 +103,49 @@ final class DependencyContainer {
             qualityMetrics: metrics, correctorService: correctorService
         )
 
+        // Before the store exists: nothing of a conversation may leave the device automatically,
+        // and an iCloud backup of Application Support is exactly that.
+        if !BackupExclusion.excludeApplicationSupport() {
+            logger.error("[Container] could not exclude Application Support from backups")
+        }
+
+        // A store that cannot be opened must not take the app down with it: that crashed before the
+        // recovery prompt could ever run, so an unfinished meeting could never be recovered. The
+        // app starts with an in-memory stand-in instead; saving reports it, recovery and export
+        // keep working (durability audit 2026-09-15, R6).
+        var storeIsPersistent = true
         do {
             modelContainer = try ModelContainer(for: ConversationRecord.self,
                                                      SessionQualityRecord.self)
         } catch {
-            fatalError("SwiftData container init failed: \(error)")
+            logger.fault("[Container] conversation store unavailable: \(error.localizedDescription, privacy: .public)")
+            storeIsPersistent = false
+            do {
+                modelContainer = try ModelContainer(for: ConversationRecord.self, SessionQualityRecord.self,
+                                                    configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+            } catch {
+                fatalError("SwiftData could not create even an in-memory store: \(error)")
+            }
         }
-        let convRepo = ConversationRepository(context: modelContainer.mainContext)
+        // A saved conversation is sealed, as a whole, to a key held by this device's Secure
+        // Enclave: only its user can open it again — not the app on its own, not anyone else.
+        let sealer = HybridConversationSealer(loadKey: { try ConversationKeychain.loadOrCreateDeviceKey() })
+        let convRepo = ConversationRepository(context: modelContainer.mainContext, sealer: sealer,
+                                              isPersistent: storeIsPersistent)
         conversationRepository = convRepo
         saveConversationUseCase = SaveConversationUseCase(repository: convRepo, telemetry: sink)
         fetchConversationsUseCase = FetchConversationsUseCase(repository: convRepo)
+        openConversationUseCase = OpenConversationUseCase(repository: convRepo)
+
+        // Conversations saved in clear by earlier versions are sealed now. Sealing needs no user
+        // interaction, so this never blocks or prompts.
+        Task { [logger] in
+            do {
+                try await convRepo.sealLegacyConversations()
+            } catch {
+                logger.error("[Container] could not seal earlier conversations: \(error.localizedDescription, privacy: .public)")
+            }
+        }
 
         // 010: the transcript is written to disk the moment it exists. Before this it lived only
         // in a ViewModel array, and a force-quit, a background kill or one tap on the record
@@ -114,14 +153,16 @@ final class DependencyContainer {
         let transcriptJournal = FileTranscriptJournal()
         journal = transcriptJournal
 
-        historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase)
+        historyViewModel = ConversationHistoryViewModel(fetchUseCase: fetchConversationsUseCase,
+                                                        openUseCase: openConversationUseCase)
         transcriptionViewModel = TranscriptionViewModel(
             transcribeUseCase: transcribeUseCase,
             saveConversationUseCase: saveConversationUseCase,
             downloadCoordinator: coordinator,
             audioSessionCoordinator: sessionCoordinator,
             telemetry: sink,
-            journal: transcriptJournal
+            journal: transcriptJournal,
+            levelMonitor: monitor
         )
     }
 

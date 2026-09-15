@@ -2,6 +2,9 @@
 //  ConversationHistoryView.swift
 //  TranslatorApp
 //
+//  Saved conversations are private (2026-09-15): the list shows when each one was saved and
+//  nothing of what was said. Opening one asks the user to confirm it is them.
+//
 
 import SwiftUI
 
@@ -18,11 +21,15 @@ struct ConversationHistoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 10) {
-                        ForEach(viewModel.conversations, id: \.id) { conv in
-                            NavigationLink(destination: ConversationDetailView(conversation: conv)) {
-                                ConversationCard(conversation: conv)
+                        ForEach(viewModel.conversations) { summary in
+                            Button {
+                                Task { await viewModel.open(summary) }
+                            } label: {
+                                ConversationCard(summary: summary,
+                                                 isOpening: viewModel.openingId == summary.id)
                             }
                             .buttonStyle(.plain)
+                            .disabled(viewModel.openingId != nil)
                         }
                     }
                     .padding(.horizontal)
@@ -31,6 +38,14 @@ struct ConversationHistoryView: View {
             }
         }
         .navigationTitle("Conversations")
+        .navigationDestination(isPresented: Binding(
+            get: { viewModel.openedConversation != nil },
+            set: { if !$0 { viewModel.closeConversation() } }
+        )) {
+            if let conversation = viewModel.openedConversation {
+                ConversationDetailView(conversation: conversation)
+            }
+        }
         .preferredColorScheme(.dark)
         .task { await viewModel.loadConversations() }
         .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
@@ -42,12 +57,12 @@ struct ConversationHistoryView: View {
 
     private var emptyState: some View {
         VStack(spacing: 20) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
+            Image(systemName: "lock.doc.fill")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
             Text("No Conversations Yet")
                 .font(.title2.weight(.semibold))
-            Text("Conversations you save during a live session\nwill appear here.")
+            Text("Conversations you save are encrypted on this device.\nOnly you can open them.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -57,7 +72,8 @@ struct ConversationHistoryView: View {
 }
 
 private struct ConversationCard: View {
-    let conversation: ConversationEntity
+    let summary: ConversationSummary
+    let isOpening: Bool
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -66,44 +82,26 @@ private struct ConversationCard: View {
         return f
     }()
 
-    private var wordCount: Int {
-        conversation.englishText.split(whereSeparator: \.isWhitespace).count
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                HStack(spacing: 6) {
-                    Image(systemName: "waveform.and.mic")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.yellow)
-                    Text(Self.dateFormatter.string(from: conversation.savedAt))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("\(wordCount) words")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.blue)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.blue.opacity(0.15))
-                    .clipShape(Capsule())
+        HStack(spacing: 12) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(.yellow)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Self.dateFormatter.string(from: summary.savedAt))
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Encrypted · only you can open it")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
-
-            Text(conversation.preview)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.65))
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.right.circle")
-                    .font(.system(size: 10))
-                Text("View full conversation")
-                    .font(.system(size: 11, weight: .medium))
+            Spacer()
+            if isOpening {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.blue.opacity(0.8))
             }
-            .foregroundStyle(Color.blue.opacity(0.8))
         }
         .padding(14)
         .background(Color(white: 0.14))

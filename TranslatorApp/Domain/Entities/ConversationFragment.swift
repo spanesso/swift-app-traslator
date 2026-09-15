@@ -56,6 +56,30 @@ nonisolated enum TranslationOutcome: Sendable, Equatable {
     case translated(String)
     case unavailable(Reason)
 
+    /// Classifies what came back from the translation service.
+    ///
+    /// A service handed a fragment it cannot work with may return the input unchanged rather
+    /// than fail. Stored as a translation, that is English sitting in the Spanish pane looking
+    /// exactly like a real result — which is what the user reported seeing.
+    ///
+    /// The echo check needs at least three words: plenty of one- and two-word phrases are
+    /// genuinely identical in both languages ("No.", "OK.", names, numbers, cognates), and
+    /// flagging those would invent a failure that never happened.
+    nonisolated static func forResult(_ translated: String, source: String) -> TranslationOutcome {
+        let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unavailable(.emptyResult) }
+
+        let sourceWords = source.split(whereSeparator: \.isWhitespace)
+        guard sourceWords.count >= 3 else { return .translated(trimmed) }
+
+        let normalizedSource = sourceWords.map { TranscriptWindow.normalize(String($0)) }
+        let normalizedResult = trimmed.split(whereSeparator: \.isWhitespace)
+            .map { TranscriptWindow.normalize(String($0)) }
+        return normalizedSource == normalizedResult
+            ? .unavailable(.notTranslated)
+            : .translated(trimmed)
+    }
+
     nonisolated enum Reason: String, Sendable, Equatable {
         /// The translation service threw.
         case failed
@@ -67,6 +91,9 @@ nonisolated enum TranslationOutcome: Sendable, Equatable {
         case timedOut
         /// `prepareTranslation` failed, so no phrase in the session could be translated.
         case serviceUnavailable
+        /// The service handed back the source text unchanged. Storing that as a translation put
+        /// English in the Spanish pane, indistinguishable from a real result.
+        case notTranslated
 
         nonisolated var shortDescription: String {
             switch self {
@@ -75,6 +102,7 @@ nonisolated enum TranslationOutcome: Sendable, Equatable {
             case .emptyResult:        return "empty result"
             case .timedOut:           return "timed out"
             case .serviceUnavailable: return "translation service unavailable"
+            case .notTranslated:      return "not translated"
             }
         }
     }

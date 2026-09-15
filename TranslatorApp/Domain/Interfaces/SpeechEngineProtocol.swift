@@ -34,4 +34,7 @@ enum SpeechEngineError: Error, Sendable, Equatable {
     case modelUnavailable
     case unsupportedLocale
     case unsupportedDevice
+    /// The device cannot recognise speech locally. Recording does not start: falling back to a
+    /// server is never an option, because nothing the user says may leave the device.
+    case onDeviceRecognitionUnavailable
 }

@@ -18,6 +18,11 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Necesitamos acceso al micrófono para transcribir tu voz en tiempo real y poder traducirla.</string>
 
+    <!-- 2026-09-15: saved conversations are sealed to a Secure Enclave key; opening one asks
+         the owner of the device first. Without this key Face ID terminates the app. -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>Tus conversaciones guardadas están cifradas en este dispositivo. Face ID confirma que eres tú antes de abrirlas.</string>
+
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Utilizamos el reconocimiento de voz de Apple para convertir tus palabras en texto localmente.</string>
 </dict>

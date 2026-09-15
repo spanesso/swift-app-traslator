@@ -21,6 +21,11 @@ actor QualityMetricsService {
     private var currentSessionId: String?
     private var previousTranscript: String = ""
     private var lastTranscriptUpdate: ContinuousClock.Instant?
+    /// The current verdict. It is also the hysteresis state — which threshold applies depends on
+    /// it — so it must be updated on every call, not only when it is logged.
+    private var isCurrentlyLowQuality = false
+    /// Counted separately from the sample arrays, which are capped and would saturate.
+    private var observationCount = 0
     private let maxSamples = 100
 
     func startSession(sessionId: String) {
@@ -34,6 +39,8 @@ actor QualityMetricsService {
         tokenConfidences.removeAll()
         previousTranscript = ""
         lastTranscriptUpdate = nil
+        isCurrentlyLowQuality = false
+        observationCount = 0
         logger.info("📊 [Quality] Session started: \(sessionId)")
     }
 
@@ -50,6 +57,7 @@ actor QualityMetricsService {
     func recordSegmentObservation(text: String, isFinal: Bool, confidence: Float) {
         guard currentSessionId != nil else { return }
         let now = MonotonicClock.now()
+        observationCount += 1
 
         // A "revision" is the recogniser CHANGING what it already said — not simply sending
         // another partial. Counting every partial produced rates around 180/min against a
@@ -113,6 +121,52 @@ actor QualityMetricsService {
                                totalRevisions: totalRevisions)
     }
 
+    // MARK: - Calibration
+    //
+    // Numbers from field traces of real multi-speaker meetings on on-device recognition.
+    //
+    // The original ceiling of 10 revisions/min classified EVERY session as low quality: a
+    // meeting that is working sits around 35/min, because `addsPunctuation` keeps rewording
+    // what it already said. That was not cosmetic — it pinned the emission delay at 1 200 ms
+    // for the whole session, so the 700 ms path never ran and a pause between two speakers was
+    // never short enough to release the phrase.
+
+    /// It takes this to be called low quality…
+    nonisolated static var enterLowRevisionRate: Double { 45.0 }
+    /// …and it stays low until it comes back under this. The gap is deliberate: with a single
+    /// threshold at the operating point the verdict flipped on every crossing — a trace showed
+    /// 34.4 → 36.5 → 34.7 within a minute — and each flip moved the emission delay between
+    /// 700 ms and 1 200 ms for a change no speaker would recognise as a change.
+    nonisolated static var leaveLowRevisionRate: Double { 35.0 }
+    nonisolated static var fragmentationCeiling: Double { 0.15 }
+
+    /// No verdict before the session has produced something to judge.
+    ///
+    /// `revisionRate` divides by the elapsed session time, so two seconds in, ONE revision reads
+    /// as 30/min. Field traces opened every meeting with `revRate=85.0` and a LOW verdict built
+    /// on noise — which put the slowest emission delay exactly where the first phrases arrive.
+    nonisolated static var warmUpSeconds: Double { 20 }
+    nonisolated static var warmUpObservations: Int { 25 }
+
+    /// The verdict itself, as a pure function of the evidence and the previous verdict.
+    ///
+    /// Separated from the actor so the calibration can be tested directly, without a session,
+    /// a clock, or a stream of fake partials.
+    ///
+    /// `confidence` is nil whenever no final result has carried one — which on iOS 26 on-device
+    /// recognition means the whole meeting, since `isFinal` effectively never fires. The term is
+    /// kept for engines that do report finals; do not read the expression as if all three
+    /// signals were live on this platform.
+    nonisolated static func classify(revisionRate: Double,
+                                     fragmentation: Double,
+                                     confidence: Float?,
+                                     wasLow: Bool) -> Bool {
+        let revisionCeiling = wasLow ? leaveLowRevisionRate : enterLowRevisionRate
+        if revisionRate > revisionCeiling { return true }
+        if let confidence, confidence < 0.6 { return true }
+        return fragmentation > fragmentationCeiling
+    }
+
     /// Drives the segmenter's adaptive stability delay.
     ///
     /// 008 fix (FR-015): speaking rate was removed from this decision. A fast speaker
@@ -121,19 +175,39 @@ actor QualityMetricsService {
     /// it needed to speed up, and contributing to the "fast speech loses fragments" report.
     /// Rate is a property of the speaker; it is not evidence of poor recognition.
     func isLowQualitySpeech() -> Bool {
-        let m = getCurrentMetrics()
-        let hasConfidenceData = !confidenceScores.isEmpty
-        let low = m.revisionRate > 10.0 ||
-                  (hasConfidenceData && m.avgConfidence < 0.6) ||
-                  m.avgFragmentation > 0.15
-        if low {
-            logger.warning("""
-                ⚠️ [Quality] Low quality | revRate=\(String(format: "%.1f", m.revisionRate)) \
-                conf=\(String(format: "%.2f", m.avgConfidence)) \
-                frag=\(String(format: "%.2f", m.avgFragmentation))
-                """)
+        guard hasEnoughEvidenceToJudge else {
+            report(false, snapshot: nil)
+            return false
         }
+        let m = getCurrentMetrics()
+        let low = Self.classify(revisionRate: m.revisionRate,
+                                fragmentation: m.avgFragmentation,
+                                confidence: confidenceScores.isEmpty ? nil : m.avgConfidence,
+                                wasLow: isCurrentlyLowQuality)
+        report(low, snapshot: m)
         return low
+    }
+
+    private var hasEnoughEvidenceToJudge: Bool {
+        guard observationCount >= Self.warmUpObservations else { return false }
+        guard let startedAt = sessionStartTime else { return false }
+        return Date().timeIntervalSince(startedAt) >= Self.warmUpSeconds
+    }
+
+    /// Logs only on a change of verdict. This used to log on every partial — three lines a
+    /// second for the whole meeting — which buried every other event in the trace.
+    private func report(_ low: Bool, snapshot: QualitySnapshot?) {
+        guard low != isCurrentlyLowQuality else { return }
+        isCurrentlyLowQuality = low
+        guard let m = snapshot else {
+            logger.notice("📊 [Quality] OK | warming up")
+            return
+        }
+        logger.notice("""
+            📊 [Quality] \(low ? "LOW" : "OK") | revRate=\(String(format: "%.1f", m.revisionRate)) \
+            conf=\(String(format: "%.2f", m.avgConfidence)) \
+            frag=\(String(format: "%.2f", m.avgFragmentation))
+            """)
     }
 
     // MARK: - Helpers

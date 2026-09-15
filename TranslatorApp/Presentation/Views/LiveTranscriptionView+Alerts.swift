@@ -32,9 +32,11 @@ private struct SessionAlertsModifier: ViewModifier {
             // A meeting the app never got to finish. Recovering is the default; discarding is
             // destructive and is marked as such (FR-012).
             .alert("Unfinished meeting found",
-                   isPresented: .constant(viewModel.recoverableSession != nil)) {
+                   isPresented: .constant(viewModel.recoverableSession != nil
+                                          && !viewModel.pendingRecoveryDiscardConfirmation)) {
                 Button("Recover") { viewModel.recoverPendingSession() }
-                Button("Discard", role: .destructive) { viewModel.discardPendingSession() }
+                // Never a one-tap deletion: someone in a hurry to record reaches for this button.
+                Button("Discard", role: .destructive) { viewModel.pendingRecoveryDiscardConfirmation = true }
             } message: {
                 if let recovered = viewModel.recoverableSession {
                     Text(recoveryMessage(for: recovered))
@@ -45,12 +47,34 @@ private struct SessionAlertsModifier: ViewModifier {
             .confirmationDialog("Start a new recording?",
                                 isPresented: $viewModel.pendingNewSessionConfirmation,
                                 titleVisibility: .visible) {
-                Button("Start new recording", role: .destructive) {
-                    viewModel.confirmStartNewSession()
+                if viewModel.isArchived {
+                    Button("Start new recording") { viewModel.confirmStartNewSession() }
+                } else {
+                    // The user decides; saving is offered first and discarding is marked as what it is.
+                    Button("Save and start new") { viewModel.saveAndStartNewSession() }
+                    Button("Discard and start new", role: .destructive) {
+                        viewModel.confirmStartNewSession()
+                    }
                 }
                 Button("Cancel", role: .cancel) { viewModel.cancelStartNewSession() }
             } message: {
                 Text(viewModel.newSessionConfirmationMessage)
+            }
+            .confirmationDialog("Discard the unfinished meeting?",
+                                isPresented: $viewModel.pendingRecoveryDiscardConfirmation,
+                                titleVisibility: .visible) {
+                Button("Discard meeting", role: .destructive) { viewModel.discardPendingSession() }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text("It was never saved. Once discarded it cannot be recovered.")
+            }
+            .confirmationDialog("Discard this meeting?",
+                                isPresented: $viewModel.pendingDiscardConfirmation,
+                                titleVisibility: .visible) {
+                Button("Discard meeting", role: .destructive) { viewModel.discardConversation() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("It has not been saved. Once discarded it cannot be recovered.")
             }
             .task {
                 await viewModel.checkForRecoverableSession()

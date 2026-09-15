@@ -126,6 +126,67 @@ final class TranscriptJournalTests: XCTestCase {
         XCTAssertEqual(recovered?.fragments.last?.sourceText, "phrase 19")
     }
 
+    // MARK: - Ghost journals (durability audit, 2026-09-15)
+
+    /// An entry of a meeting that was already saved or discarded arrived late and recreated its
+    /// journal. The ghost then blocked the next meeting from opening its own.
+    func testLateEntryOfADiscardedMeetingDoesNotBringItsJournalBack() async throws {
+        try await journal.beginSession(id: "S14")
+        try await journal.record(.source(fragment(0, "hello"), sessionId: "S14", epochMs: 1))
+        await journal.discard()
+
+        let late = try XCTUnwrap(TranscriptJournalEntry.translation(fragmentId: 0, outcome: .translated("hola"),
+                                                                    sessionId: "S14", epochMs: 2))
+        try? await journal.record(late)
+
+        let pending = await journal.hasPendingSession()
+        XCTAssertFalse(pending, "a late entry brought a discarded meeting's journal back")
+    }
+
+    // MARK: - Killed mid-phrase (out of memory, 2026-09-15)
+
+    /// The system terminates the app for memory while the speaker is mid-phrase. Nothing of that
+    /// phrase had been committed yet, so it lived only in memory — the drafts are what survive.
+    private func appendRaw(_ line: String) throws {
+        let url = try journalURL()
+        var raw = try Data(contentsOf: url)
+        raw.append(contentsOf: Array(line.utf8))
+        raw.append(0x0A)
+        try raw.write(to: url)
+    }
+
+    func testTextNotYetCommittedSurvivesAKill() async throws {
+        try await journal.beginSession(id: "S11")
+        try await journal.record(.source(fragment(0, "first phrase"), sessionId: "S11", epochMs: 1))
+        try await journal.record(.source(fragment(1, "second phrase"), sessionId: "S11", epochMs: 2))
+        try appendRaw(#"{"kind":"draft","fragmentId":2,"sessionId":"S11","epochMs":3,"sourceText":"we were talking about the"}"#)
+        try appendRaw(#"{"kind":"draft","fragmentId":2,"sessionId":"S11","epochMs":4,"sourceText":"we were talking about the budget"}"#)
+
+        let recovered = await FileTranscriptJournal().pendingSession()
+        XCTAssertEqual(recovered?.fragments.map(\.sourceText),
+                       ["first phrase", "second phrase", "we were talking about the budget"],
+                       "the phrase in progress when the app was killed must be recovered, in its latest form")
+    }
+
+    func testMeetingKilledBeforeItsFirstPhraseIsStillRecovered() async throws {
+        try await journal.beginSession(id: "S12")
+        try appendRaw(#"{"kind":"draft","fragmentId":0,"sessionId":"S12","epochMs":1,"sourceText":"good morning everyone let us start"}"#)
+
+        let recovered = await FileTranscriptJournal().pendingSession()
+        XCTAssertEqual(recovered?.fragments.map(\.sourceText), ["good morning everyone let us start"])
+    }
+
+    /// A draft that later became a committed phrase must not appear twice.
+    func testDraftIsReplacedByThePhraseItBecame() async throws {
+        try await journal.beginSession(id: "S13")
+        try await journal.record(.source(fragment(0, "first phrase"), sessionId: "S13", epochMs: 1))
+        try appendRaw(#"{"kind":"draft","fragmentId":1,"sessionId":"S13","epochMs":2,"sourceText":"we were talking"}"#)
+        try await journal.record(.source(fragment(1, "we were talking about it"), sessionId: "S13", epochMs: 3))
+
+        let recovered = await FileTranscriptJournal().pendingSession()
+        XCTAssertEqual(recovered?.fragments.map(\.sourceText), ["first phrase", "we were talking about it"])
+    }
+
     /// Entries may reach disk out of order — recovery orders by phrase, not by file position.
     func testOutOfOrderEntriesRecoverInSpokenOrder() async throws {
         try await journal.beginSession(id: "S6")
@@ -168,6 +229,21 @@ final class TranscriptJournalTests: XCTestCase {
             XCTAssertEqual(recovered?.fragments.first?.sourceText, "hello",
                            "the original meeting must still be intact")
         }
+    }
+
+    /// Defence in depth for the same defect: even if a caller writes without opening its own
+    /// session, an entry from another meeting must never be appended to a pending journal.
+    func testEntryFromAnotherMeetingIsNotAppendedToAPendingJournal() async throws {
+        try await journal.beginSession(id: "OLD")
+        try await journal.record(.source(fragment(0, "old meeting"), sessionId: "OLD", epochMs: 1))
+
+        let afterRelaunch = FileTranscriptJournal()
+        try? await afterRelaunch.record(.source(fragment(0, "new meeting"), sessionId: "NEW", epochMs: 2))
+
+        let recovered = await FileTranscriptJournal().pendingSession()
+        XCTAssertEqual(recovered?.sessionId, "OLD")
+        XCTAssertEqual(recovered?.fragments.map(\.sourceText), ["old meeting"],
+                       "two meetings were mixed in one journal")
     }
 
     // MARK: - Cost

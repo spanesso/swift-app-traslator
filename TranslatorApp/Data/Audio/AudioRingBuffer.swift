@@ -62,11 +62,16 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
         guard buffer.frameLength > 0 else { return }
         lock.lock(); defer { lock.unlock() }
 
-        if slots.isEmpty {
+        // First buffer — or the input changed underneath us. The pool used to be sized once for
+        // the first format it ever saw and then silently refuse everything else: after a route
+        // change every rotation replayed stale audio, or none (research 2026-09-15, A2). This is
+        // an allocation on the tap thread, paid only when the hardware format actually changes.
+        if slots.isEmpty
+            || !Self.formatsMatch(slots[0].format, buffer.format)
+            || buffer.frameLength > slots[0].frameCapacity {
             allocateStorageLocked(like: buffer)
             guard !slots.isEmpty else { return }
         }
-        guard Self.formatsMatch(slots[0].format, buffer.format) else { return }
 
         let index = writeIndex
         guard Self.copySamples(from: buffer, to: slots[index]) else { return }
@@ -87,7 +92,10 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
     /// Called once per rotation, from the actor — never from the audio thread — so the copies
     /// made here are safe to allocate. They ARE copies precisely because the slots are recycled
     /// the moment this returns.
-    nonisolated func drain() -> [AVAudioPCMBuffer] {
+    ///
+    /// - Parameter lastMs: when given, only the newest buffers covering at least this much audio
+    ///   are returned. The rest is dropped with the store.
+    nonisolated func drain(lastMs: Int? = nil) -> [AVAudioPCMBuffer] {
         lock.lock()
         var ordered: [(AVAudioPCMBuffer, AVAudioFrameCount)] = []
         if filled > 0 {
@@ -104,7 +112,8 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
         bufferedFrames = 0
         lock.unlock()
 
-        return ordered.compactMap { slot, frames in
+        let kept = lastMs.map { Self.newest(ordered, coveringMs: $0) } ?? ordered[...]
+        return kept.compactMap { slot, frames in
             guard let copy = AVAudioPCMBuffer(pcmFormat: slot.format, frameCapacity: frames) else {
                 return nil
             }
@@ -128,6 +137,21 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
         let evicted = evictedSinceReport
         evictedSinceReport = 0
         return (ms, filled, evicted)
+    }
+
+    /// The shortest run of newest buffers holding at least `ms` of audio.
+    private nonisolated static func newest(_ ordered: [(AVAudioPCMBuffer, AVAudioFrameCount)],
+                                           coveringMs ms: Int)
+        -> ArraySlice<(AVAudioPCMBuffer, AVAudioFrameCount)> {
+        guard let rate = ordered.first?.0.format.sampleRate, rate > 0 else { return ordered[...] }
+        let wanted = AVAudioFramePosition(Double(max(ms, 0)) * rate / 1000.0)
+        var frames: AVAudioFramePosition = 0
+        var start = ordered.count
+        while start > 0, frames < wanted {
+            start -= 1
+            frames += AVAudioFramePosition(ordered[start].1)
+        }
+        return ordered[start...]
     }
 
     // MARK: - Storage

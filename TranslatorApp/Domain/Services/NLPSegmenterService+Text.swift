@@ -12,35 +12,73 @@ import NaturalLanguage
 
 extension NLPSegmenterService {
 
+    /// Whether the recogniser threw its transcript away and started a new one.
+    ///
+    /// Compared against the PREVIOUS TEXT rather than against the committed baseline: the
+    /// previous text is always one update old, so the signal is unambiguous. A revision moves
+    /// the word count by one or two; a restart drops it to a fraction.
+    nonisolated static func didRestartTranscript(previous: String, incoming: String) -> Bool {
+        let previousWords = previous.split(whereSeparator: \.isWhitespace).count
+        guard previousWords >= 4 else { return false }
+        let incomingWords = incoming.split(whereSeparator: \.isWhitespace).count
+        return incomingWords * 2 <= previousWords
+    }
+
     /// The still-uncommitted suffix of the recogniser's cumulative text.
     ///
     /// `SFSpeechRecognizer` with `addsPunctuation` REWRITES the whole string as it goes —
-    /// capitalisation, commas, and corrected words — so the exact-prefix test fails routinely
-    /// and the word count can even go DOWN between two partials of the same utterance.
+    /// capitalisation, commas, corrected words — so an exact-prefix test fails routinely and the
+    /// word count can even go DOWN between two partials of the same utterance. Reading a
+    /// shrinking count as "the recogniser restarted" wiped the baseline and made everything
+    /// already emitted pending again: that was the Spanish pane rewriting itself.
     ///
-    /// The old code read a shrinking word count as "the recogniser restarted", wiped the
-    /// committed baseline, and made the entire cumulative transcript pending again. Everything
-    /// already emitted was then re-emitted and re-translated: that is the Spanish pane rewriting
-    /// itself. A restart is now signalled explicitly by `SpeechSegment.sessionGeneration`, so
-    /// that guess is unnecessary — and what remains of it is deliberately conservative.
+    /// Bounded (010): this used to keep the entire meeting in one string and copy it on
+    /// every partial. Only the end of it was ever needed, so only the end is kept.
     func pendingSuffix(of fullText: String) -> String {
-        let normalized = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let committed = committedFullText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !committed.isEmpty else { return normalized }
-        if normalized.hasPrefix(committed) {
-            return String(normalized.dropFirst(committed.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        let window = TranscriptWindow.trailingWords(of: fullText, limit: Self.pendingScanWindow)
+        guard committedWordCount > 0, !committedTailWords.isEmpty else {
+            anchorMisses = 0
+            return window.joined(separator: " ")
         }
-        let words = normalized.split(whereSeparator: \.isWhitespace)
-        // A real restart begins near zero. A revision moves the count by a word or two, so only
-        // a collapse to under half the committed length is treated as a restart.
-        if words.count * 2 < committedWordCount {
-            committedFullText = ""; committedWordCount = 0; pendingStartedAt = nil
-            committedTailWords.removeAll(keepingCapacity: true)
-            return normalized
+        if let tail = TranscriptWindow.tailAfterAnchor(window: window,
+                                                       committedTail: committedTailWords) {
+            anchorMisses = 0
+            return tail
         }
-        guard words.count > committedWordCount else { return "" }
-        return words.dropFirst(committedWordCount).joined(separator: " ")
+
+        // No anchor, but the transcript is at least as long as what was consumed: this is a
+        // revision of the committed words themselves — typically the LAST one ("Tuesday" →
+        // "Thursday"), which every anchor ends on. Position is still valid there, so resume from
+        // it. The alternative below re-emitted the whole utterance, up to 200 words, as if it
+        // were new; past 400 committed words that happened on a single miss (research
+        // 2026-09-15, D1 and D2).
+        let totalWords = wordCountOf(fullText)
+        if totalWords >= committedWordCount {
+            let consumedInWindow = committedWordCount - (totalWords - window.count)
+            if consumedInWindow >= 0 {
+                anchorMisses = 0
+                return window.dropFirst(consumedInWindow).joined(separator: " ")
+            }
+        }
+
+        anchorMisses += 1
+        // A real restart begins near zero; a revision moves the count by a word or two.
+        //
+        // The miss count is what makes this safe. The ratio test alone could never become true
+        // again once the window had grown past half the committed count, so a baseline that went
+        // stale — which is what an unsignalled transcript restart does — stalled the segmenter
+        // for the REST OF THE MEETING: `pendingSuffix` returned "" on every update, no phrase
+        // was ever emitted again, and nothing anywhere reported a problem.
+        if window.count * 2 < committedWordCount || anchorMisses >= Self.maxAnchorMisses {
+            committedWordCount = 0
+            // Kept, not cleared: it is the only defence against re-showing the words that span
+            // the boundary. `emitIfViable` trims them off the next candidate.
+            pendingStartedAt = nil
+            anchorMisses = 0
+            return window.joined(separator: " ")
+        }
+        // A heavy rewrite of text already emitted: nothing new to show yet.
+        return ""
     }
 
     // MARK: - Overlap trimming
@@ -50,19 +88,17 @@ extension NLPSegmenterService {
     ///
     /// Even with a correct baseline, a revision can hand back a tail that starts inside text
     /// already on screen. Without this, the user reads a phrase, then reads a longer version of
-    /// the same phrase a moment later and loses the thread. Comparison is case-, accent- and
-    /// punctuation-insensitive because those are exactly what the recogniser keeps rewriting.
+    /// the same phrase a moment later and loses the thread.
+    ///
+    /// Bounded (010): `committedTailWords` already holds only the last few dozen words. This
+    /// used to split the ENTIRE meeting transcript and allocate a String per word — thousands of
+    /// allocations — only to keep the last forty of them, on every emitted phrase.
     func trimmingOverlapWithCommitted(_ candidate: String) -> String {
         let candidateWords = candidate.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !candidateWords.isEmpty else { return candidate }
+        guard !candidateWords.isEmpty, !committedTailWords.isEmpty else { return candidate }
 
-        // Bounded by construction: `committedTailWords` already holds only the last few dozen
-        // words. The previous version split the ENTIRE meeting transcript and allocated a String
-        // per word — thousands of allocations — only to keep the last 40 of them, on every
-        // emitted phrase.
-        guard !committedTailWords.isEmpty else { return candidate }
-        let window = committedTailWords.map { Self.normalizeWord($0) }
-        let candidateNormalized = candidateWords.map { Self.normalizeWord($0) }
+        let window = committedTailWords.map { TranscriptWindow.normalize($0) }
+        let candidateNormalized = candidateWords.map { TranscriptWindow.normalize($0) }
         let maxOverlap = min(window.count, candidateNormalized.count)
         guard maxOverlap > 0 else { return candidate }
 
@@ -73,13 +109,7 @@ extension NLPSegmenterService {
         return candidate
     }
 
-    private nonisolated static func normalizeWord(_ word: String) -> String {
-        word.folding(options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive],
-                     locale: nil)
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined()
-    }
+    // MARK: - Text helpers
 
     func wordCountOf(_ text: String) -> Int { text.split(whereSeparator: \.isWhitespace).count }
 

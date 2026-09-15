@@ -27,6 +27,9 @@ final class TranscriptionViewModel {
     /// Durable record of the meeting in progress (010). The transcript is written here the
     /// moment it exists, so it no longer depends on the process staying alive.
     let journal: any TranscriptJournalProtocol
+    /// Live input level. Reading it is how the user finds out, DURING the meeting, that a quiet
+    /// speaker is not reaching the microphone — instead of discovering the gap afterwards.
+    let levelMonitor: AudioLevelMonitor
 
     // MARK: - State
 
@@ -46,6 +49,22 @@ final class TranscriptionViewModel {
     var sessionState: RecordingSessionState = .idle
 
     var translationRequests: AsyncStream<TranslationRequest>?
+
+    /// Identity of the CURRENT request stream. The interface keys its translation task on this,
+    /// not on `isRecording`.
+    ///
+    /// A manual restart replaces the stream while the session stays recording, so `isRecording`
+    /// never changes value: the old consumer ended with the old stream and no new one was ever
+    /// created. Every phrase after that point was queued into a stream nobody was reading and
+    /// kept its spinner for the rest of the meeting, with no error anywhere.
+    var translationStreamId: UUID?
+
+    /// Incremented once per recording session. Shutdown is asynchronous, so its tail can land
+    /// after the user has already started the next meeting; without this it closed the NEW
+    /// session's request stream. Anything queued behind an `await` re-checks this before
+    /// touching session state.
+    var sessionEpoch: Int = 0
+
     var isSaving: Bool = false
     var savedSuccessfully: Bool = false
     var latestSegmentConfidence: Float = 1.0
@@ -60,12 +79,29 @@ final class TranscriptionViewModel {
     var recoverableSession: RecoveredSession?
     /// Raised when starting a new recording would clear content from the screen.
     var pendingNewSessionConfirmation: Bool = false
+    /// Raised when the user asks to discard a meeting that has not been saved.
+    var pendingDiscardConfirmation: Bool = false
+    /// Raised when the user asks to discard the unfinished meeting found at launch.
+    var pendingRecoveryDiscardConfirmation: Bool = false
+
+    /// The fragment whose translation has been in flight long enough that something is wrong.
+    /// The queue is deliberately serial (concurrent calls on one `TranslationSession` are not
+    /// documented as safe), so a single stuck call stops the Spanish pane for good. Nothing is
+    /// lost — the English is journaled and the fragments resolve as unavailable at stop — but
+    /// without this the user just watches one pane stop growing and cannot tell why.
+    var stalledTranslationId: Int?
+    var isTranslationStalled: Bool { stalledTranslationId != nil }
+
+    /// What the microphone is picking up right now, refreshed while recording.
+    var inputLevel: AudioLevelMonitor.Reading = .silent
 
     /// Kept as a derived value so existing views and `onChange` observers are unaffected.
     var isRecording: Bool { sessionState.isRecording }
     var isSuspended: Bool { sessionState.isSuspended }
     var suspensionReason: AudioInterruptionReason? { sessionState.suspensionReason }
-    var canSave: Bool { !isRecording && !fragments.isEmpty }
+    /// Only once fully stopped: during `.stopping` the last phrase and translations are still
+    /// arriving, and saving then sealed an incomplete meeting (durability audit 2026-09-15).
+    var canSave: Bool { sessionState == .idle && !fragments.isEmpty }
 
     // MARK: - Private state
 
@@ -73,12 +109,26 @@ final class TranscriptionViewModel {
     var transcriptionTask: Task<Void, Never>?
     private var downloadStateTask: Task<Void, Never>?
     private var audioEventTask: Task<Void, Never>?
-    var fragmentKeys: Set<String> = []
+    /// Recent phrases only, not the whole meeting: a phrase said again later is not a duplicate
+    /// (research 2026-09-15, P2).
+    var recentPhrases = RecentPhraseFilter()
+    /// True while `restartListening` replaces the pipeline, so the old consumer ending on purpose
+    /// is not mistaken for the session ending.
+    var isRestartingListening = false
     /// Kept in step with `fragments` instead of recomputed. See `pendingCount`.
     var pendingFragmentCount: Int = 0
     /// Last reconciliation branch reported, so the per-partial telemetry only fires on a change
     /// instead of three times a second for the whole meeting.
     var lastReportedBranch: PrefixBranch?
+    var translationWatchdog: Task<Void, Never>?
+    /// Draft journaling of the words not committed yet (TranscriptionViewModel+Draft.swift).
+    var draftTask: Task<Void, Never>?
+    var lastDraftText: String?
+    var lastDraftAt: ContinuousClock.Instant?
+    var levelPollTask: Task<Void, Never>?
+    /// Well above anything legitimate: field telemetry showed a median of ~79 ms, a ~1.3 s cold
+    /// start, and a single 3.9 s outlier at shutdown. Ten seconds only fires when it is stuck.
+    nonisolated static var translationStallThresholdMs: Int { 10_000 }
     var nextFragmentId: Int = 0
     var sessionId = "----"
 
@@ -95,47 +145,17 @@ final class TranscriptionViewModel {
          downloadCoordinator: BackgroundAssetsCoordinator,
          audioSessionCoordinator: any AudioSessionCoordinatorProtocol,
          telemetry: any PipelineTelemetryProtocol,
-         journal: any TranscriptJournalProtocol) {
+         journal: any TranscriptJournalProtocol,
+         levelMonitor: AudioLevelMonitor) {
         self.transcribeUseCase = transcribeUseCase
         self.saveConversationUseCase = saveConversationUseCase
         self.downloadCoordinator = downloadCoordinator
         self.audioSessionCoordinator = audioSessionCoordinator
         self.telemetry = telemetry
         self.journal = journal
+        self.levelMonitor = levelMonitor
         subscribeToDownloadState()
         subscribeToAudioEvents()
-    }
-
-    // MARK: - Recovery (010 US2)
-
-    /// Looks for a meeting left behind by a previous run. Called when the interface appears.
-    func checkForRecoverableSession() async {
-        guard fragments.isEmpty, !isRecording else { return }
-        guard let recovered = await journal.pendingSession(), !recovered.isEmpty else { return }
-        recoverableSession = recovered
-        logger.notice("[ViewModel] found a recoverable session with \(recovered.fragments.count) fragment(s)")
-    }
-
-    /// Brings the recovered meeting back on screen. It behaves like any other finished session:
-    /// it can be saved and exported, and its journal stays on disk until it is.
-    func recoverPendingSession() {
-        guard let recovered = recoverableSession else { return }
-        fragments = recovered.fragments
-        fragmentKeys = Set(recovered.fragments.map { Self.dedupKey($0.sourceText) })
-        nextFragmentId = (recovered.fragments.map(\.id).max() ?? -1) + 1
-        sessionId = recovered.sessionId
-        isArchived = false
-        currentBuffer = ""
-        recoverableSession = nil
-        logger.info("[ViewModel] recovered session restored to screen")
-    }
-
-    /// Throws the recovered meeting away. Only ever reached through an explicit confirmation in
-    /// the interface (FR-012).
-    func discardPendingSession() {
-        recoverableSession = nil
-        Task { [journal] in await journal.discard() }
-        logger.notice("[ViewModel] recovered session discarded by the user")
     }
 
     // MARK: - Subscriptions
@@ -188,14 +208,21 @@ final class TranscriptionViewModel {
     /// Entry point for the record button.
     ///
     /// Starting a new meeting with content on screen used to wipe it with no warning — one tap,
-    /// no confirmation, no recovery. Now it asks (010 FR-019). With automatic archiving the
-    /// previous meeting is already safe, so this is a safety net rather than the last line of
-    /// defence, but the user still deserves to know their screen is about to be cleared.
+    /// no confirmation, no recovery. Now it asks (010 FR-019), and since 2026-09-15 a finished
+    /// meeting is never saved on its own: the question is whether to save or discard it.
     func toggleRecording() {
         if isRecording {
             stopRecording()
+        } else if sessionState == .stopping {
+            // The last meeting is still delivering its last phrase. Starting now left its consumer
+            // alive: that phrase landed in the new meeting, and the old stream closing stopped the
+            // NEW recording (durability audit 2026-09-15).
+            return
+        } else if recoverableSession != nil {
+            // The recovery prompt is on screen and has to be answered first.
+            return
         } else if fragments.isEmpty {
-            startRecording()
+            startRecordingUnlessAMeetingIsPending()
         } else {
             pendingNewSessionConfirmation = true
         }
@@ -204,7 +231,10 @@ final class TranscriptionViewModel {
     /// Called after the user confirms they want to start over.
     func confirmStartNewSession() {
         pendingNewSessionConfirmation = false
-        startRecording()
+        // The confirmation told the user an unsaved meeting would be discarded. Its journal has
+        // to go with it; left on disk, the new meeting could not open its own and was written
+        // into the old one (research 2026-09-15, P9).
+        startRecording(discardingUnsavedJournal: !isArchived)
     }
 
     func cancelStartNewSession() {
@@ -214,21 +244,7 @@ final class TranscriptionViewModel {
     /// Message for that confirmation, honest about whether the previous meeting is safe.
     var newSessionConfirmationMessage: String {
         isArchived
-            ? "The previous meeting is saved in your history. Starting a new recording will clear the screen."
-            : "The previous meeting has NOT been saved yet. Starting a new recording will discard it."
-    }
-
-    /// Manual restart. The 300 ms sleep this used to contain is gone: it deterministically threw
-    /// away a third of a second of audio with the engine already stopped, and the recogniser
-    /// rotation path (which loses nothing) does the same job.
-    func restartListening() {
-        guard isRecording else { return }
-        transcriptionTask?.cancel(); transcriptionTask = nil
-        translationContinuation?.finish(); translationContinuation = nil; translationRequests = nil
-        Task { [weak self] in
-            guard let self else { return }
-            await self.transcribeUseCase.stop()
-            self.startRecording(preservingSession: true)
-        }
+            ? "This meeting is saved and encrypted in your history. Starting a new recording will clear the screen."
+            : "This meeting has not been saved. Save it (encrypted) or discard it before starting a new recording."
     }
 }

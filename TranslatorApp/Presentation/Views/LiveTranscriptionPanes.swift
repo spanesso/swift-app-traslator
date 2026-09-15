@@ -22,6 +22,38 @@ extension LiveTranscriptionView {
         .foregroundStyle(.secondary)
     }
 
+    /// Live input meter.
+    ///
+    /// When someone at the far end of the table speaks quietly the recogniser returns nothing and
+    /// the app just stays silent — the loss is only discovered afterwards, when that stretch is
+    /// missing. Nothing recovers audio that never reached the microphone, but this at least stops
+    /// it being lost WITHOUT ANYONE NOTICING: if the bar barely moves while someone is talking,
+    /// the phone needs to move or they need to speak up, and the user can see that in the moment.
+    func inputLevelMeter() -> some View {
+        let reading = viewModel.inputLevel
+        return HStack(spacing: 5) {
+            Image(systemName: reading.hasSpeechEnergy ? "waveform" : "waveform.slash")
+                .font(.system(size: 9))
+                .foregroundStyle(reading.hasSpeechEnergy ? .green : .secondary)
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.10))
+                    // Peak stays visible briefly so a short word is not missed between refreshes.
+                    Capsule()
+                        .fill(Color.white.opacity(0.20))
+                        .frame(width: geometry.size.width * CGFloat(reading.recentPeak))
+                    Capsule()
+                        .fill(reading.hasSpeechEnergy ? Color.green : Color.orange)
+                        .frame(width: geometry.size.width * CGFloat(reading.level))
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(.horizontal)
+        .opacity(viewModel.isRecording ? 1 : 0.25)
+    }
+
     // MARK: - English pane
 
     func englishPane() -> some View {
@@ -112,7 +144,7 @@ extension LiveTranscriptionView {
             let isLast = fragment.id == lastId
             switch fragment.translation {
             case .pending:
-                pendingRow
+                pendingRow(isStalled: viewModel.stalledTranslationId == fragment.id)
             case .translated(let text):
                 Text(text)
                     .font(.system(size: isLast ? 20 : 18, weight: isLast ? .semibold : .medium))
@@ -131,13 +163,21 @@ extension LiveTranscriptionView {
     }
 
     /// A phrase whose translation is still in flight. Deliberately content-free.
-    private var pendingRow: some View {
+    ///
+    /// The stalled variant matters: the queue is serial, so one stuck call stops this pane for
+    /// the rest of the meeting. Without saying so, the user watches one side keep growing and
+    /// the other stop, with no way to tell whether anyone is simply not speaking.
+    private func pendingRow(isStalled: Bool) -> some View {
         HStack(spacing: 6) {
-            ProgressView().controlSize(.mini)
-            Text("Translating…")
+            if isStalled {
+                Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.orange)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+            Text(isStalled ? "Translation is taking unusually long…" : "Translating…")
                 .font(.system(size: 13, weight: .regular))
                 .italic()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isStalled ? Color.orange : Color.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)

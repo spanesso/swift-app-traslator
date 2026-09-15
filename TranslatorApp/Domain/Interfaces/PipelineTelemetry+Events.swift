@@ -110,6 +110,13 @@ extension PipelineTelemetryProtocol {
         ]))
     }
 
+    /// `inFlightMs` is how long the call has been running when we gave up believing it.
+    nonisolated func translationStalled(_ sid: String, fragmentId: Int, inFlightMs: Int, queueDepth: Int) {
+        emit(TelemetryEvent(kind: .translationStalled, sessionId: sid, fields: [
+            .init("frag", fragmentId), .init("inFlightMs", inFlightMs), .init("depth", queueDepth)
+        ]))
+    }
+
     nonisolated func translationDedupDropped(_ sid: String, fragmentId: Int) {
         emit(TelemetryEvent(kind: .translationDedup, sessionId: sid, fields: [.init("frag", fragmentId)]))
     }

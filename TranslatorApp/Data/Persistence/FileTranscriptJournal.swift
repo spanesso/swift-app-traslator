@@ -3,7 +3,7 @@
 //  TranslatorApp
 //
 //  Append-only, crash-safe journal of the meeting in progress
-//  (010-transcript-durability, US1 and US2).
+//  (010-transcript-durability, US1 and US2). Recovery lives in FileTranscriptJournal+Recovery.swift.
 //
 //  WHY A FILE AND NOT THE DATABASE
 //  Crash semantics have to be reasoned about, not hoped for. One JSON object per line, appended
@@ -21,26 +21,37 @@
 //  keeps the file writable while locked, provided the device was unlocked once since boot —
 //  which is the honest limit and is stated in the spec.
 //
+//  A FAILED WRITE LOSES NOTHING (durability audit 2026-09-15)
+//  Every entry is queued before it is written and leaves the queue only once it is on storage. A
+//  transient failure — a full disk, an I/O error — keeps it for the next write instead of dropping
+//  it, and a write cut short is truncated back so it cannot corrupt the entry after it.
+//
 
 import Foundation
 import OSLog
 
 actor FileTranscriptJournal: TranscriptJournalProtocol {
 
-    private let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Journal")
-    private let fileManager = FileManager.default
+    let logger = Logger(subsystem: "com.spanesso.TraslatorApp", category: "Journal")
+    let fileManager = FileManager.default
     private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    let decoder = JSONDecoder()
 
     private var handle: FileHandle?
     private var currentSessionId: String?
+    /// Accepted entries not on storage yet, oldest first.
+    private var unwritten: [(sessionId: String, line: Data)] = []
+    /// Meetings already saved or discarded. A late entry of one of them — a translation arriving
+    /// after its journal was deleted — used to recreate the file as a ghost that then blocked the
+    /// next meeting from opening its own.
+    private var closedSessionIds: Set<String> = []
 
     private nonisolated static var directoryName: String { "LiveTranscript" }
     private nonisolated static var fileName: String { "session.jsonl" }
 
     // MARK: - Location
 
-    private func journalURL() throws -> URL {
+    func journalURL() throws -> URL {
         guard let support = try? fileManager.url(for: .applicationSupportDirectory,
                                                  in: .userDomainMask,
                                                  appropriateFor: nil,
@@ -58,6 +69,8 @@ actor FileTranscriptJournal: TranscriptJournalProtocol {
                 throw TranscriptJournalError.storageUnavailable
             }
         }
+        // The meeting in progress must never ride along in an automatic backup.
+        BackupExclusion.exclude(directory)
         return directory.appendingPathComponent(Self.fileName)
     }
 
@@ -92,29 +105,74 @@ actor FileTranscriptJournal: TranscriptJournalProtocol {
     }
 
     func record(_ entry: TranscriptJournalEntry) throws {
+        guard !closedSessionIds.contains(entry.sessionId) else { return }
+
+        var line: Data
+        do {
+            line = try encoder.encode(entry)
+        } catch {
+            throw TranscriptJournalError.writeFailed(error.localizedDescription)
+        }
+        line.append(0x0A) // newline: the delimiter the whole recovery story depends on
+        // Queued BEFORE anything can fail: from here on the entry is only dropped once written.
+        unwritten.append((entry.sessionId, line))
+
         // A journal can legitimately not be open yet — a recovered session being re-displayed,
         // for instance. Opening lazily keeps the caller from having to know.
-        if handle == nil {
+        if handle == nil || currentSessionId != entry.sessionId {
+            closeHandle()
             try beginSessionIfNeeded(id: entry.sessionId)
         }
-        guard let handle else { throw TranscriptJournalError.storageUnavailable }
+        try writeUnwritten()
+    }
 
-        do {
-            var line = try encoder.encode(entry)
-            line.append(0x0A) // newline: the delimiter the whole recovery story depends on
-            try handle.write(contentsOf: line)
-            // Flush to disk NOW. Without this the guarantee is "the text survives if the app
-            // exits politely", which is precisely the case that was never the problem.
+    /// Writes every queued entry of the open session, in order. Entries of another session stay
+    /// queued for when their own journal is open.
+    private func writeUnwritten() throws {
+        guard let handle, let currentSessionId else { throw TranscriptJournalError.storageUnavailable }
+        var kept: [(sessionId: String, line: Data)] = []
+        var index = 0
+        while index < unwritten.count {
+            let item = unwritten[index]
+            index += 1
+            guard !closedSessionIds.contains(item.sessionId) else { continue }
+            guard item.sessionId == currentSessionId else { kept.append(item); continue }
+
+            let offset = try? handle.offset()
+            do {
+                try handle.write(contentsOf: item.line)
+                try Self.commitToStorage(handle)
+            } catch {
+                // A write cut short leaves half a line, and the next good write would be glued to
+                // it and lost with it. Cut the file back to the last whole entry.
+                if let offset { try? handle.truncate(atOffset: offset) }
+                unwritten = kept + [item] + unwritten[index...]
+                logger.error("[Journal] write failed, \(self.unwritten.count) entr(ies) kept for retry: \(error.localizedDescription, privacy: .public)")
+                throw TranscriptJournalError.writeFailed(error.localizedDescription)
+            }
+        }
+        unwritten = kept
+    }
+
+    /// `F_FULLFSYNC` asks the storage itself to commit, not only the kernel: the difference between
+    /// surviving a killed process and surviving a sudden power loss. Falls back to `fsync`.
+    private nonisolated static func commitToStorage(_ handle: FileHandle) throws {
+        if fcntl(handle.fileDescriptor, F_FULLFSYNC) != 0 {
             try handle.synchronize()
-        } catch {
-            logger.error("[Journal] write failed: \(error.localizedDescription, privacy: .public)")
-            throw TranscriptJournalError.writeFailed(error.localizedDescription)
         }
     }
 
     private func beginSessionIfNeeded(id: String) throws {
         let url = try journalURL()
-        if !fileManager.fileExists(atPath: url.path) {
+        if fileManager.fileExists(atPath: url.path) {
+            // Never append one meeting to another meeting's journal. When a new session could not
+            // open its own journal, every phrase used to land here, in the file of the meeting
+            // waiting to be recovered — and recovery then mixed the two (research 2026-09-15, P9).
+            if let owner = ownerOfJournal(at: url), owner != id {
+                logger.warning("[Journal] refusing to append session \(id, privacy: .public) to the pending journal of \(owner, privacy: .public)")
+                throw TranscriptJournalError.writeFailed("another meeting is still waiting to be recovered")
+            }
+        } else {
             guard fileManager.createFile(
                 atPath: url.path,
                 contents: nil,
@@ -133,73 +191,47 @@ actor FileTranscriptJournal: TranscriptJournalProtocol {
         }
     }
 
-    // MARK: - Recovery
-
-    func hasPendingSession() -> Bool {
-        guard let url = try? journalURL(),
-              let size = try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int else {
-            return false
-        }
-        return size > 0
-    }
-
-    func pendingSession() -> RecoveredSession? {
-        guard let url = try? journalURL(),
-              let data = try? Data(contentsOf: url),
-              !data.isEmpty else { return nil }
-
-        var sources: [Int: (text: String, confidence: Float)] = [:]
-        var outcomes: [Int: TranslationOutcome] = [:]
-        var sessionId: String?
-        var earliestEpochMs = Int.max
-        var damagedLines = 0
-
-        // Split on newlines and decode each line independently. A line that does not decode is
-        // the torn tail of a killed write — dropping it costs one phrase and saves the rest.
+    /// The session of the first whole entry, or nil when the file holds none.
+    private func ownerOfJournal(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
-            guard let entry = try? decoder.decode(TranscriptJournalEntry.self, from: Data(line)) else {
-                damagedLines += 1
-                continue
-            }
-            sessionId = sessionId ?? entry.sessionId
-            earliestEpochMs = min(earliestEpochMs, entry.epochMs)
-            switch entry.kind {
-            case .source:
-                if let text = entry.sourceText {
-                    sources[entry.fragmentId] = (text, entry.confidence ?? 1.0)
-                }
-            case .translation:
-                if let outcome = entry.replayedOutcome { outcomes[entry.fragmentId] = outcome }
+            if let entry = try? decoder.decode(TranscriptJournalEntry.self, from: Data(line)) {
+                return entry.sessionId
             }
         }
-
-        if damagedLines > 0 {
-            logger.warning("[Journal] discarded \(damagedLines) damaged entr\(damagedLines == 1 ? "y" : "ies")")
-        }
-        guard !sources.isEmpty, let sessionId else { return nil }
-
-        // Ordered by fragment id, not by position in the file: entries may have been appended
-        // out of order and it does not matter.
-        let fragments = sources.keys.sorted().map { id -> ConversationFragment in
-            let source = sources[id]!
-            return ConversationFragment(id: id,
-                                        sourceText: source.text,
-                                        translation: outcomes[id] ?? .unavailable(.timedOut),
-                                        sourceConfidence: source.confidence)
-        }
-        logger.info("[Journal] recovered \(fragments.count) fragment(s) from session \(sessionId, privacy: .public)")
-        return RecoveredSession(sessionId: sessionId,
-                                fragments: fragments,
-                                startedAtEpochMs: earliestEpochMs == .max ? 0 : earliestEpochMs)
+        return nil
     }
+
+    // MARK: - Ending
 
     func discard() {
+        let url = try? journalURL()
+        var owner = currentSessionId
+        if owner == nil, let url { owner = ownerOfJournal(at: url) }
+        if let owner { closedSessionIds.insert(owner) }
+
         closeHandle()
-        if let url = try? journalURL() {
-            try? fileManager.removeItem(at: url)
-        }
+        if let url { try? fileManager.removeItem(at: url) }
+        unwritten.removeAll { closedSessionIds.contains($0.sessionId) }
         currentSessionId = nil
         logger.info("[Journal] discarded")
+    }
+
+    func setAsideUnreadable() {
+        closeHandle()
+        currentSessionId = nil
+        guard let url = try? journalURL(), fileManager.fileExists(atPath: url.path) else { return }
+        let folder = url.deletingLastPathComponent().appendingPathComponent("Unreadable", isDirectory: true)
+        try? fileManager.createDirectory(at: folder,
+                                         withIntermediateDirectories: true,
+                                         attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        let target = folder.appendingPathComponent("session-\(Int(Date().timeIntervalSince1970)).jsonl")
+        do {
+            try fileManager.moveItem(at: url, to: target)
+            logger.error("[Journal] an unreadable journal was set aside, not deleted")
+        } catch {
+            logger.error("[Journal] could not set aside an unreadable journal: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func closeHandle() {

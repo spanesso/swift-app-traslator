@@ -30,9 +30,6 @@ struct LiveTailReconciler: Sendable {
     private static var scanWindowWords: Int { 120 }
     /// How much committed text to keep for matching. Only the end is ever needed.
     private static var committedTailWords: Int { 40 }
-    /// Longest anchor tried when locating the committed text inside the incoming window.
-    private static var maxAnchorWords: Int { 12 }
-
     /// Words committed since the CURRENT recognition session began — the count is the authority
     /// for position; the text is only kept as a bounded tail for matching.
     private(set) var committedWordCountInSession: Int = 0
@@ -49,10 +46,7 @@ struct LiveTailReconciler: Sendable {
         let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return }
         committedWordCountInSession += words.count
-        committedTail.append(contentsOf: words)
-        if committedTail.count > Self.committedTailWords {
-            committedTail.removeFirst(committedTail.count - Self.committedTailWords)
-        }
+        TranscriptWindow.appendBounded(words, to: &committedTail, limit: Self.committedTailWords)
     }
 
     /// The recogniser rotated. Everything committed before is no longer comparable against what
@@ -74,7 +68,8 @@ struct LiveTailReconciler: Sendable {
     /// text and returns whatever follows it. Matching ignores case, accents and punctuation
     /// because those are exactly what `addsPunctuation` keeps rewriting.
     mutating func liveTail(from recognizerFullText: String) -> ReconcileResult {
-        let window = Self.trailingWords(of: recognizerFullText, limit: Self.scanWindowWords)
+        let window = TranscriptWindow.trailingWords(of: recognizerFullText,
+                                                    limit: Self.scanWindowWords)
         guard !window.isEmpty else {
             return ReconcileResult(tail: "", branch: .noCommitted, detectedRestart: false)
         }
@@ -85,7 +80,8 @@ struct LiveTailReconciler: Sendable {
                                    detectedRestart: false)
         }
 
-        if let tail = Self.tailAfterAnchor(window: window, committedTail: committedTail) {
+        if let tail = TranscriptWindow.tailAfterAnchor(window: window,
+                                                       committedTail: committedTail) {
             return ReconcileResult(tail: tail, branch: .hasPrefix, detectedRestart: false)
         }
 
@@ -102,68 +98,6 @@ struct LiveTailReconciler: Sendable {
         return ReconcileResult(tail: "", branch: .wordCount, detectedRestart: false)
     }
 
-    // MARK: - Bounded helpers
-
-    /// The last `limit` words, found by scanning backwards. Never touches the front of the
-    /// string, so the cost is the size of the window, not the size of the meeting.
-    static func trailingWords(of text: String, limit: Int) -> [String] {
-        var words: [String] = []
-        words.reserveCapacity(limit)
-        var end = text.endIndex
-
-        while end > text.startIndex, words.count < limit {
-            // Skip separators before the next word.
-            var cursor = end
-            while cursor > text.startIndex,
-                  text[text.index(before: cursor)].isWhitespace {
-                cursor = text.index(before: cursor)
-            }
-            guard cursor > text.startIndex else { break }
-            let wordEnd = cursor
-            while cursor > text.startIndex,
-                  !text[text.index(before: cursor)].isWhitespace {
-                cursor = text.index(before: cursor)
-            }
-            words.append(String(text[cursor..<wordEnd]))
-            end = cursor
-        }
-        return words.reversed()
-    }
-
-    /// Finds the committed text inside the window and returns what follows it.
-    ///
-    /// Tries progressively shorter anchors: the recogniser routinely rewrites the last few words
-    /// it emitted, so insisting on a long exact match would fail constantly.
-    private static func tailAfterAnchor(window: [String], committedTail: [String]) -> String? {
-        let normalizedWindow = window.map { normalize($0) }
-        let normalizedCommitted = committedTail.map { normalize($0) }
-
-        let longest = min(maxAnchorWords, normalizedCommitted.count, normalizedWindow.count)
-        guard longest >= 1 else { return nil }
-
-        for anchorLength in stride(from: longest, through: 1, by: -1) {
-            let anchor = Array(normalizedCommitted.suffix(anchorLength))
-            // Last occurrence: if the phrase repeats, the most recent one is the boundary.
-            var start = normalizedWindow.count - anchorLength
-            while start >= 0 {
-                if Array(normalizedWindow[start..<(start + anchorLength)]) == anchor {
-                    let tailStart = start + anchorLength
-                    guard tailStart < window.count else { return "" }
-                    return window[tailStart...].joined(separator: " ")
-                }
-                start -= 1
-            }
-        }
-        return nil
-    }
-
-    private static func normalize(_ word: String) -> String {
-        word.folding(options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive],
-                     locale: nil)
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined()
-    }
 }
 
 nonisolated struct ReconcileResult: Sendable, Equatable {

@@ -29,8 +29,10 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
     let telemetry: any PipelineTelemetryProtocol
     var sessionId = "----"
 
-    var committedFullText: String = ""
     var committedWordCount: Int = 0
+    /// How far back to read the recogniser's cumulative text. ~60 s of speech, far more than a
+    /// pending tail can legitimately reach given the 3 s emission ceiling.
+    nonisolated static var pendingScanWindow: Int { 200 }
     /// Last few dozen committed words, kept so overlap trimming never has to look at the whole
     /// meeting. `committedWordCount` remains the authority for position.
     var committedTailWords: [String] = []
@@ -47,6 +49,11 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
 
     var stabilityTimer: Task<Void, Never>?
     var ceilingTimer: Task<Void, Never>?
+
+    /// Consecutive updates in which the committed text could not be located in the recogniser's
+    /// window. Bounded, because the alternative was a permanent stall — see `pendingSuffix`.
+    var anchorMisses = 0
+    nonisolated static var maxAnchorMisses: Int { 3 }
 
     init(qualityMetrics: QualityMetricsService, telemetry: any PipelineTelemetryProtocol) {
         self.qualityMetrics = qualityMetrics
@@ -71,16 +78,15 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
     private func resetSession() async {
         sessionId = TelemetrySessionId.new()
         await qualityMetrics.startSession(sessionId: sessionId)
-        committedFullText = ""
         committedWordCount = 0
         lastSeenFullText = ""
         committedTailWords.removeAll(keepingCapacity: true)
         pendingStartedAt = nil
-        committedTailWords.removeAll(keepingCapacity: true)
         pendingHypothesis = nil
         currentSegmentConfidence = 1.0
         lastSeenGeneration = 0
         lastKnownLowQuality = false
+        anchorMisses = 0
         cancelTimers()
     }
 
@@ -115,10 +121,18 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
             telemetry.asrRestartDetected(sessionId,
                                          incomingWords: wordCount,
                                          committedWords: committedWordCount)
-            committedFullText = ""
+            // What was still pending belongs to the transcript that just ended. It used to be
+            // dropped here: the baseline was reset without emitting it, and the armed timer then
+            // compared against the NEW transcript and never matched (research 2026-09-15, P4).
+            flushBeforeRestart(continuation: continuation)
             committedWordCount = 0
             lastSeenFullText = ""
-            committedTailWords.removeAll(keepingCapacity: true)
+            // KEPT, exactly as on the unsignalled-restart path below. The new request is fed the
+            // most recent audio again, so its first words repeat the end of what was committed;
+            // clearing this showed them twice (D3).
+            pendingStartedAt = nil
+            anchorMisses = 0
+            cancelTimers()
         }
 
         // ── THE 008 FIX (US3 / FR-013) ────────────────────────────────────────────────────
@@ -131,6 +145,29 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
         // Now every early return goes through `reschedule(...)`, which re-arms the timer with
         // the tail that is still pending.
         let fullText = segment.text
+
+        // ── THE UTTERANCE BOUNDARY (field logs, multi-speaker meeting) ───────────────────────
+        // On iOS 26 the on-device recogniser restarts its transcript at an utterance boundary
+        // WITHOUT reporting a final result and without ending the task — so `sessionGeneration`
+        // does not change and the check above cannot see it. The baseline then pointed into a
+        // string that no longer existed: `pendingSuffix` returned nothing, the phrase already on
+        // the pending tail was stranded, and the next speaker's first words waited for the 3 s
+        // ceiling before anyone saw them.
+        //
+        // A restart is also the one moment we KNOW an utterance is over, so the pending tail is
+        // emitted here instead of being held for a timer that no longer has anything to wait for.
+        if Self.didRestartTranscript(previous: lastSeenFullText, incoming: fullText) {
+            telemetry.asrRestartDetected(sessionId,
+                                         incomingWords: wordCountOf(fullText),
+                                         committedWords: committedWordCount)
+            flushBeforeRestart(continuation: continuation)
+            committedWordCount = 0
+            // `committedTailWords` is deliberately KEPT: the new transcript often repeats the
+            // words spoken across the boundary, and this is what stops them being shown twice.
+            pendingStartedAt = nil
+            anchorMisses = 0
+            cancelTimers()
+        }
 
         if fullText == lastSeenFullText {
             reschedule(reason: .duplicateText, continuation: continuation)
@@ -152,8 +189,14 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
         let sentences = splitIntoSentences(pending)
         if sentences.count >= 2 {
             for completed in sentences.dropLast() {
-                emitIfViable(completed, continuation: continuation, tag: "sentence",
-                             confidence: currentSegmentConfidence)
+                // Stop at the first sentence that cannot leave on its own. Emitting the ones
+                // after it moved the anchor past it, and it was never emitted at all: "Yes. I
+                // agree with that." lost the "Yes." (research 2026-09-15, P5). Whatever is held
+                // back here leaves together with what follows, through the tail path below.
+                let emitted = emitIfViable(completed, continuation: continuation, tag: "sentence",
+                                           confidence: currentSegmentConfidence,
+                                           forceEmit: Self.isStandaloneUtterance(completed))
+                guard emitted else { break }
             }
         }
 
@@ -194,13 +237,5 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
             confidence: currentSegmentConfidence,
             reason: .newSegment,
             continuation: continuation)
-    }
-
-    private func flushTrailing(continuation: AsyncStream<SegmentedPhrase>.Continuation) {
-        cancelTimers()
-        let trailing = pendingSuffix(of: lastSeenFullText).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trailing.isEmpty else { return }
-        emitIfViable(trailing, continuation: continuation, tag: "flush",
-                     confidence: currentSegmentConfidence, forceEmit: true)
     }
 }

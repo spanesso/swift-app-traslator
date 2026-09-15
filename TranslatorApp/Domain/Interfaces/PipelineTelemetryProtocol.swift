@@ -95,6 +95,25 @@ extension PipelineTelemetryProtocol {
             .init("sinceTranscriptMs", msSinceLastTranscript), .init("sinceStartMs", msSinceStart)
         ]))
     }
+
+    /// The recogniser went quiet while the microphone was still carrying speech.
+    ///
+    /// `rotated=true` is the app doing something about it. A run of these with `rotated=false`
+    /// means the timeout is firing during genuine silence and is mistuned; a run with
+    /// `rotated=true` and a growing `consecutive` means rotating is not bringing it back, which
+    /// points at the microphone rather than at the recogniser.
+    nonisolated func recognizerDeaf(_ sid: String,
+                                    msSinceLastTranscript: Int,
+                                    level: Float,
+                                    rotated: Bool,
+                                    consecutive: Int) {
+        emit(TelemetryEvent(kind: .recognizerDeaf, sessionId: sid, fields: [
+            .init("sinceTranscriptMs", msSinceLastTranscript),
+            .init("level", Double(level)),
+            .init("rotated", rotated),
+            .init("consecutive", consecutive)
+        ]))
+    }
 }
 
 // MARK: - Audio continuity (FR-003)

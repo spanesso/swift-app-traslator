@@ -23,6 +23,11 @@ nonisolated struct TranscriptJournalEntry: Sendable, Codable, Equatable {
         case source
         /// The outcome of translating that phrase: either text, or an explicit unavailability.
         case translation
+        /// The words still being spoken, not committed yet (2026-09-15). Written while they
+        /// change, at most once a second, so a termination that runs no code — the system killing
+        /// the app for memory — cannot take the phrase in progress with it. Recovery keeps only the
+        /// newest draft past the last committed phrase; a `source` with the same id supersedes it.
+        case draft
     }
 
     let kind: Kind
@@ -69,6 +74,18 @@ nonisolated struct TranscriptJournalEntry: Sendable, Codable, Equatable {
                                epochMs: epochMs,
                                sourceText: fragment.sourceText,
                                confidence: fragment.sourceConfidence)
+    }
+
+    /// `fragmentId` is the id the phrase WILL take when it is committed.
+    nonisolated static func draft(text: String,
+                                  fragmentId: Int,
+                                  sessionId: String,
+                                  epochMs: Int) -> TranscriptJournalEntry {
+        TranscriptJournalEntry(kind: .draft,
+                               fragmentId: fragmentId,
+                               sessionId: sessionId,
+                               epochMs: epochMs,
+                               sourceText: text)
     }
 
     nonisolated static func translation(fragmentId: Int,

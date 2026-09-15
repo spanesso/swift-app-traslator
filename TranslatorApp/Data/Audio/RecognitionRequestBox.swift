@@ -52,6 +52,42 @@ final class RecognitionRequestBox: @unchecked Sendable {
         }
     }
 
+    /// Feeds a captured buffer to the active request AND to the carry-over window, under the same
+    /// lock `swap(to:replaying:lastMs:)` takes. Called from the tap.
+    ///
+    /// Taking them separately left a gap (research 2026-09-15, A5): a buffer could reach the old
+    /// request after the window had been drained for the new one, and so reach neither the new
+    /// request nor its replay.
+    nonisolated func append(_ buffer: AVAudioPCMBuffer, recordingInto ring: AudioRingBuffer) {
+        state.withLock { current in
+            ring.append(buffer)
+            current?.append(buffer)
+        }
+    }
+
+    /// Replays the newest `lastMs` of the window into `request` and makes it the active one, in
+    /// one step with respect to the tap. The tap waits on the lock for the length of a copy.
+    ///
+    /// - Returns: the request that was replaced, and what was replayed.
+    nonisolated func swap(to request: SFSpeechAudioBufferRecognitionRequest,
+                          replaying ring: AudioRingBuffer,
+                          lastMs: Int)
+        -> (previous: SFSpeechAudioBufferRecognitionRequest?, replayedBuffers: Int, replayedMs: Int) {
+        state.withLock { current in
+            let replay = ring.drain(lastMs: lastMs)
+            var replayedMs = 0.0
+            for buffer in replay {
+                request.append(buffer)
+                if buffer.format.sampleRate > 0 {
+                    replayedMs += Double(buffer.frameLength) / buffer.format.sampleRate * 1000.0
+                }
+            }
+            let previous = current
+            current = request
+            return (previous, replay.count, Int(replayedMs))
+        }
+    }
+
     /// True when the given request is still the active one. Lets a recognition callback ignore
     /// results from a request that a rotation already superseded.
     nonisolated func isCurrent(_ request: SFSpeechAudioBufferRecognitionRequest) -> Bool {

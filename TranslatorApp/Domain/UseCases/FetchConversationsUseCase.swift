@@ -12,7 +12,8 @@ final class FetchConversationsUseCase {
         self.repository = repository
     }
 
-    func execute() async throws -> [ConversationEntity] {
-        try await repository.fetchAll()
+    /// Summaries only. Listing the history never decrypts anything (2026-09-15).
+    func execute() async throws -> [ConversationSummary] {
+        try await repository.fetchSummaries()
     }
 }

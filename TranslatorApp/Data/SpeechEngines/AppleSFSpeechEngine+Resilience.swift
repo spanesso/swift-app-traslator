@@ -45,7 +45,7 @@ extension AppleSFSpeechEngine {
     /// the stream is not finished, the history is not cleared, and the audio session is not
     /// deactivated (FR-030).
     private func suspend(reason: AudioInterruptionReason) async {
-        guard !isSuspended, !isFinished else { return }
+        guard !isSuspended, !isFinished, !isStopping else { return }
         isSuspended = true
         logger.warning("[AppleSFSpeech] suspended by \(reason.rawValue, privacy: .public)")
         await capture.stop()
@@ -55,7 +55,7 @@ extension AppleSFSpeechEngine {
     /// Resumes after an interruption ends — whether that was signalled by the system
     /// notification or discovered by the backup poll (research §R2).
     private func resume() async {
-        guard isSuspended, !isFinished else { return }
+        guard isSuspended, !isFinished, !isStopping else { return }
         isSuspended = false
         await sessionCoordinator.noteResumed()
         do {
@@ -77,8 +77,14 @@ extension AppleSFSpeechEngine {
     /// Route or configuration change: the input node's format changed, so the tap genuinely has
     /// to be reinstalled — the one case where touching it is correct (research §R4).
     private func rebuild(reason: AudioInterruptionReason) async {
-        guard !isFinished else { return }
+        guard !isFinished, !isStopping else { return }
         do {
+            if reason == .mediaServicesReset {
+                // The daemon behind the audio session restarted, taking the session's
+                // configuration with it. Re-installing a tap without reconfiguring it could
+                // "start" and never deliver a buffer (research 2026-09-15, A3).
+                try await sessionCoordinator.activate()
+            }
             try await capture.rebuildCapture(reason: reason)
             rotate(trigger: reason == .routeChanged ? .routeChange : .configChange)
             logger.info("[AppleSFSpeech] capture rebuilt after \(reason.rawValue, privacy: .public)")
@@ -94,7 +100,7 @@ extension AppleSFSpeechEngine {
     /// suspension other than resuming, and it is loud on purpose: the user must find out now,
     /// not when they look at the transcript later.
     private func giveUp(afterMs: Int) {
-        guard !isFinished else { return }
+        guard !isFinished, !isStopping else { return }
         telemetry.sessionEnd(sessionId,
                              reason: .interruption,
                              errorDomain: "AudioSession",

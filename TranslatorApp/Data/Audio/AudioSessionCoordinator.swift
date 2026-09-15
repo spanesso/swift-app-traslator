@@ -83,6 +83,7 @@ actor AudioSessionCoordinator: AudioSessionCoordinatorProtocol {
         }
         isActive = true
         lastActivationAt = MonotonicClock.now()
+        configureMicrophone(session)
         telemetry.audioSessionConfigured(sessionId,
                                          category: AudioSessionConfig.categoryName,
                                          mode: AudioSessionConfig.modeName,
@@ -90,6 +91,58 @@ actor AudioSessionCoordinator: AudioSessionCoordinatorProtocol {
                                          sampleRate: session.sampleRate,
                                          ioBufferDurationMs: session.ioBufferDuration * 1000,
                                          inputChannels: session.inputNumberOfChannels)
+    }
+
+    /// Asks the built-in microphone for an omnidirectional pickup pattern.
+    ///
+    /// WHY THIS MATTERS FOR A MEETING
+    /// The default pattern on an iPhone is directional and aimed at whoever is holding the
+    /// phone. Put the phone on a table with people around it and the app is actively attenuating
+    /// the very speakers who are hardest to hear. Omnidirectional treats every direction alike.
+    ///
+    /// EVERY STEP IS OPTIONAL BY DESIGN. Polar-pattern support depends on the device and the
+    /// data source, and losing capture is far worse than losing the pattern — so nothing here
+    /// throws, and a failure leaves the previous configuration in place.
+    private func configureMicrophone(_ session: AVAudioSession) {
+        guard let microphone = session.availableInputs?.first(where: { $0.portType == .builtInMic })
+        else {
+            logger.info("[AudioSession] no built-in microphone to configure")
+            return
+        }
+        try? session.setPreferredInput(microphone)
+
+        guard let dataSources = microphone.dataSources, !dataSources.isEmpty else {
+            logger.info("[AudioSession] microphone exposes no data sources; keeping defaults")
+            return
+        }
+        guard let omnidirectional = dataSources.first(where: {
+            $0.supportedPolarPatterns?.contains(.omnidirectional) == true
+        }) else {
+            let available = dataSources.compactMap(\.dataSourceName).joined(separator: ",")
+            logger.notice("[AudioSession] no omnidirectional pattern available (\(available, privacy: .public))")
+            return
+        }
+
+        do {
+            try omnidirectional.setPreferredPolarPattern(.omnidirectional)
+            try microphone.setPreferredDataSource(omnidirectional)
+            logger.info("""
+                [AudioSession] microphone set to omnidirectional \
+                (\(omnidirectional.dataSourceName, privacy: .public))
+                """)
+        } catch {
+            // Deliberately swallowed: capture matters, the pattern is an improvement on top.
+            logger.notice("[AudioSession] could not set omnidirectional: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// What the microphone actually ended up configured as, for telemetry and diagnostics.
+    var microphoneDescription: String {
+        let session = AVAudioSession.sharedInstance()
+        guard let input = session.currentRoute.inputs.first else { return "-" }
+        let source = input.selectedDataSource
+        let pattern = source?.selectedPolarPattern?.rawValue ?? "default"
+        return "\(input.portName)/\(source?.dataSourceName ?? "-")/\(pattern)"
     }
 
     /// Only on a real stop. Never while suspended — keeping the session active is what makes

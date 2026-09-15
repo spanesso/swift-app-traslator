@@ -21,7 +21,12 @@ extension LiveTranscriptionView {
             viewLogger.warning("⚠️ [UI] .translationTask fired but translationRequests is nil")
             return
         }
-        await MainActor.run { viewModel.translatorState = .downloadingModel }
+        // Only while the pane is empty. `.downloadingModel` replaces the whole Spanish pane with
+        // a placeholder, so announcing it on a mid-meeting restart would blank a conversation
+        // that is perfectly intact.
+        await MainActor.run {
+            if viewModel.fragments.isEmpty { viewModel.translatorState = .downloadingModel }
+        }
         do {
             try await session.prepareTranslation()
         } catch {
@@ -61,25 +66,33 @@ extension LiveTranscriptionView {
                 viewModel.telemetry.translationStarted(sid, fragmentId: request.fragmentId,
                                                        queueDepth: viewModel.pendingCount,
                                                        waitedMs: 0)
+                // Arms the stall watchdog. This queue is serial on purpose, so one stuck call
+                // freezes this pane for the rest of the meeting; the watchdog does not work
+                // around that, it makes it visible.
+                viewModel.translationDidStart(fragmentId: request.fragmentId)
             }
             do {
                 let response = try await session.translate(request.text)
                 let translated = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
                 let elapsedMs = MonotonicClock.msSince(startedAt)
                 await MainActor.run {
+                    viewModel.translationDidFinish(fragmentId: request.fragmentId)
                     viewModel.telemetry.translationDone(sid, fragmentId: request.fragmentId,
                                                         translateMs: elapsedMs,
                                                         endToEndMs: elapsedMs,
                                                         queueDepth: viewModel.pendingCount)
+                    // A service handed a fragment it cannot work with may echo the input back.
+                    // Stored as a translation, that is English sitting in the Spanish pane
+                    // looking exactly like a real result.
                     viewModel.resolveTranslation(
                         fragmentId: request.fragmentId,
-                        outcome: translated.isEmpty ? .unavailable(.emptyResult)
-                                                    : .translated(translated))
+                        outcome: .forResult(translated, source: request.text))
                 }
             } catch {
                 let description = error.localizedDescription
                 viewLogger.error("❌ [UI] Translation error: \(description)")
                 await MainActor.run {
+                    viewModel.translationDidFinish(fragmentId: request.fragmentId)
                     viewModel.telemetry.translationFailed(sid, fragmentId: request.fragmentId,
                                                           error: description,
                                                           sourceChars: trimmed.count)

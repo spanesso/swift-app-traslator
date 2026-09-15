@@ -51,7 +51,8 @@ final class TranscribeAudioUseCase {
                     // Corrector runs only on final segments (too slow for partials).
                     let corrected = await self.correctorService.process(segment)
                     if await self.isLooping(corrected) {
-                        logger.warning("[LOOP-DETECT] dropped: '\(corrected.text)'")
+                        // Counts only: the conversation never goes into a log.
+                        logger.warning("[LOOP-DETECT] dropped a looping final (\(corrected.text.count) chars)")
                         continue
                     }
                     segCont.yield(corrected)
@@ -70,11 +71,22 @@ final class TranscribeAudioUseCase {
         return (rawOutput, segmentedOutput)
     }
 
+    /// How long the pump may take to forward the recogniser's last result after the source ends.
+    nonisolated static var pumpDrainBudgetMs: Int { 1_000 }
+
+    /// Order matters (research 2026-09-15, P1). The engine is asked to finish FIRST: it ends the
+    /// source stream after the recogniser's last result, the pump forwards that result and closes
+    /// both outputs, and the segmenter flushes its trailing phrase to a consumer that is still
+    /// listening. Cancelling the pump before stopping the engine cut all of that off, and the
+    /// end of every meeting was lost.
     func stop() async {
         logger.info("🛑 [UseCase] Stopping transcription")
-        pumpTask?.cancel()
-        pumpTask = nil
         await repository.stopTranscription()
+        let drained = await TaskCompletion.wait(for: pumpTask, upToMs: Self.pumpDrainBudgetMs)
+        if !drained {
+            logger.warning("[UseCase] the pump did not drain within \(Self.pumpDrainBudgetMs)ms and was cancelled")
+        }
+        pumpTask = nil
     }
 
     // MARK: - Loop detection (SC-008 / T047)

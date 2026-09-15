@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import UIKit
 
 @main
 struct TranslatorAppApp: App {
@@ -32,6 +33,13 @@ struct TranslatorAppApp: App {
                     wasRecording: viewModel.isRecording,
                     engineIsRunning: viewModel.isRecording && !viewModel.isSuspended
                 )
+                // Leaving the foreground is when the system is most likely to terminate the app:
+                // the phrase in progress goes to disk now (2026-09-15).
+                if phase != .active { viewModel.handleLeavingForeground() }
+            }
+            // A memory warning can be the last chance before a termination that runs no code.
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                container.makeTranscriptionViewModel().handleMemoryWarning()
             }
         }
         // Register the SwiftData container so any view in the hierarchy can

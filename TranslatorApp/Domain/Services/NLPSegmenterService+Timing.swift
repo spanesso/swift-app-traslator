@@ -39,6 +39,15 @@ extension NLPSegmenterService {
                                  reason: delayReason,
                                  tailWords: wordCountOf(tail))
 
+        // Every pending tail lives under the ceiling. A clause cut cancels both timers and only
+        // this one used to come back — and it refuses a single word, so a one-word leftover
+        // waited for speech that might never come and was lost at the next stop or rotation
+        // (research 2026-09-15, P6).
+        if ceilingTimer == nil {
+            if pendingStartedAt == nil { pendingStartedAt = MonotonicClock.now() }
+            armCeiling(continuation: continuation)
+        }
+
         let armedAt = MonotonicClock.now()
         stabilityTimer = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delayNs)
@@ -106,6 +115,8 @@ extension NLPSegmenterService {
     }
 
     private func ceilingDidFire(continuation: AsyncStream<SegmentedPhrase>.Continuation) {
+        // This timer is spent. Left non-nil, `arm` would believe a ceiling was still watching.
+        ceilingTimer = nil
         let tail = pendingSuffix(of: lastSeenFullText).trimmingCharacters(in: .whitespacesAndNewlines)
         let ageMs = pendingStartedAt.map { MonotonicClock.msSince($0) } ?? 0
         telemetry.pendingAge(sessionId,
@@ -123,21 +134,48 @@ extension NLPSegmenterService {
         ceilingTimer?.cancel(); ceilingTimer = nil
     }
 
+    // MARK: - Flushes
+
+    /// Emits whatever was still pending from the transcript the recogniser just discarded.
+    ///
+    /// Held back, it would be measured against a baseline that no longer exists and would only
+    /// leave through the 3 s ceiling — which is precisely the delay the user sees when the
+    /// conversation changes speaker.
+    func flushBeforeRestart(continuation: AsyncStream<SegmentedPhrase>.Continuation) {
+        let stranded = pendingSuffix(of: lastSeenFullText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stranded.isEmpty else { return }
+        emitIfViable(stranded, continuation: continuation, tag: "utteranceEnd",
+                     confidence: currentSegmentConfidence, forceEmit: true)
+    }
+
+    /// The input ended: whatever is pending leaves now.
+    func flushTrailing(continuation: AsyncStream<SegmentedPhrase>.Continuation) {
+        cancelTimers()
+        let trailing = pendingSuffix(of: lastSeenFullText).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trailing.isEmpty else { return }
+        emitIfViable(trailing, continuation: continuation, tag: "flush",
+                     confidence: currentSegmentConfidence, forceEmit: true)
+    }
+
     // MARK: - Emission
 
     /// Consumed position and emitted text are tracked separately.
     ///
     /// `committedWordCount` is an index into the recogniser's cumulative word stream;
-    /// `committedFullText` is what the user actually saw. Overlap trimming makes the second
+    /// `committedTailWords` is the tail of what the user actually saw. Overlap trimming makes it
     /// shorter than the first, and conflating them would re-offer the trimmed words on the next
     /// partial — the same duplicate, forever.
+    /// - Returns: false only when the text was held back because it is too short to stand on its
+    ///   own. Callers walking several sentences must stop there, or they skip past it.
+    @discardableResult
     func emitIfViable(_ rawText: String,
                       continuation: AsyncStream<SegmentedPhrase>.Continuation,
                       tag: String,
                       confidence: Float,
-                      forceEmit: Bool = false) {
+                      forceEmit: Bool = false) -> Bool {
         let candidate = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !candidate.isEmpty else { return }
+        guard !candidate.isEmpty else { return true }
         let consumedWords = wordCountOf(candidate)
 
         // Clause cuts can leave a phrase starting on the separator itself (", but it's really…").
@@ -149,21 +187,22 @@ extension NLPSegmenterService {
             // Everything in this candidate was already on screen. The words were still consumed,
             // so advance past them instead of offering the same overlap again.
             advanceConsumed(consumedWords)
-            return
+            return true
         }
-        guard forceEmit || wordCountOf(display) >= minShortPhraseWords else { return }
+        guard forceEmit || wordCountOf(display) >= minShortPhraseWords else { return false }
 
         commit(display, consumedWords: consumedWords)
         continuation.yield(SegmentedPhrase(text: display, confidence: confidence))
+        return true
     }
 
+    /// Only the tail of what was emitted is kept. The full meeting text used to be accumulated
+    /// in one string and copied on every partial — O(n) per update and O(L²) over a session,
+    /// for a value whose only remaining use was matching its last few words.
     private func commit(_ text: String, consumedWords: Int) {
-        committedFullText = committedFullText.isEmpty ? text : committedFullText + " " + text
-        // Bounded tail for overlap trimming, so that path never touches the full transcript.
-        committedTailWords.append(contentsOf: text.split(whereSeparator: \.isWhitespace).map(String.init))
-        if committedTailWords.count > Self.committedTailLimit {
-            committedTailWords.removeFirst(committedTailWords.count - Self.committedTailLimit)
-        }
+        TranscriptWindow.appendBounded(text.split(whereSeparator: \.isWhitespace).map(String.init),
+                                       to: &committedTailWords,
+                                       limit: Self.committedTailLimit)
         advanceConsumed(consumedWords)
     }
 
