@@ -156,7 +156,10 @@ actor NLPSegmenterService: NLPSegmenterServiceProtocol {
         //
         // A restart is also the one moment we KNOW an utterance is over, so the pending tail is
         // emitted here instead of being held for a timer that no longer has anything to wait for.
-        if Self.didRestartTranscript(previous: lastSeenFullText, incoming: fullText) {
+        // Also caught when the length did NOT collapse — the previous utterance was short — but
+        // the new text shares nothing with the committed words (field report 2026-09-15).
+        if Self.didRestartTranscript(previous: lastSeenFullText, incoming: fullText)
+            || startsNewUtterance(fullText) {
             telemetry.asrRestartDetected(sessionId,
                                          incomingWords: wordCountOf(fullText),
                                          committedWords: committedWordCount)

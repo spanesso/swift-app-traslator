@@ -40,25 +40,38 @@ extension NLPSegmenterService {
             anchorMisses = 0
             return window.joined(separator: " ")
         }
-        if let tail = TranscriptWindow.tailAfterAnchor(window: window,
-                                                       committedTail: committedTailWords) {
+        let committedTail = committedTailWords
+        if let tail = TranscriptWindow.tailAfterAnchor(
+            window: window,
+            committedTail: committedTail,
+            shortAnchorIsTrusted: { Self.anchorContinuesCommitted(window: window, tailStart: $0, committedTail: committedTail) }
+        ) {
             anchorMisses = 0
             return tail
         }
 
-        // No anchor, but the transcript is at least as long as what was consumed: this is a
-        // revision of the committed words themselves — typically the LAST one ("Tuesday" →
-        // "Thursday"), which every anchor ends on. Position is still valid there, so resume from
-        // it. The alternative below re-emitted the whole utterance, up to 200 words, as if it
-        // were new; past 400 committed words that happened on a single miss (research
-        // 2026-09-15, D1 and D2).
         let totalWords = wordCountOf(fullText)
+        guard Self.continuesCommittedUtterance(window: window,
+                                               totalWords: totalWords,
+                                               committedWordCount: committedWordCount,
+                                               committedTail: committedTail) else {
+            // A new utterance the recogniser started without saying so — the other speaker. The
+            // positions of the previous utterance mean nothing here; counting them skipped the new
+            // speaker's first words (field report 2026-09-15).
+            committedWordCount = 0
+            pendingStartedAt = nil
+            anchorMisses = 0
+            return window.joined(separator: " ")
+        }
+
+        // Same utterance, no anchor, at least as long as what was consumed: a revision of the
+        // committed words themselves — typically the LAST one ("Tuesday" → "Thursday"), which
+        // every anchor ends on. Position is still valid there, so resume from it instead of
+        // re-emitting the whole utterance (research 2026-09-15, D1 and D2).
         if totalWords >= committedWordCount {
-            let consumedInWindow = committedWordCount - (totalWords - window.count)
-            if consumedInWindow >= 0 {
-                anchorMisses = 0
-                return window.dropFirst(consumedInWindow).joined(separator: " ")
-            }
+            anchorMisses = 0
+            let consumedInWindow = max(0, committedWordCount - (totalWords - window.count))
+            return window.dropFirst(consumedInWindow).joined(separator: " ")
         }
 
         anchorMisses += 1
@@ -100,9 +113,11 @@ extension NLPSegmenterService {
         let window = committedTailWords.map { TranscriptWindow.normalize($0) }
         let candidateNormalized = candidateWords.map { TranscriptWindow.normalize($0) }
         let maxOverlap = min(window.count, candidateNormalized.count)
-        guard maxOverlap > 0 else { return candidate }
+        // At least two words. A single shared word — "so", "okay", "yes" — is far more often the
+        // next speaker's first word than a repeat, and trimming it lost that word.
+        guard maxOverlap >= 2 else { return candidate }
 
-        for length in stride(from: maxOverlap, through: 1, by: -1) where
+        for length in stride(from: maxOverlap, through: 2, by: -1) where
             Array(window.suffix(length)) == Array(candidateNormalized.prefix(length)) {
             return candidateWords.dropFirst(length).joined(separator: " ")
         }

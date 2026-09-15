@@ -47,9 +47,15 @@ enum TranscriptWindow {
     /// it emitted — capitalisation, punctuation, a corrected word — so insisting on one long
     /// exact match would fail constantly. Matching ignores case, accents and punctuation for the
     /// same reason.
+    ///
+    /// - Parameter shortAnchorIsTrusted: asked before believing an anchor shorter than
+    ///   `trustedAnchorWords`, with the index where the tail would start. One or two words —
+    ///   "there", "so we" — turn up in unrelated sentences, and a match in the middle of a NEW
+    ///   utterance used to be taken as the committed boundary, skipping everything before it.
     nonisolated static func tailAfterAnchor(window: [String],
                                             committedTail: [String],
-                                            maxAnchorWords: Int = 12) -> String? {
+                                            maxAnchorWords: Int = 12,
+                                            shortAnchorIsTrusted: (Int) -> Bool = { _ in true }) -> String? {
         guard !window.isEmpty, !committedTail.isEmpty else { return nil }
         let normalizedWindow = window.map { normalize($0) }
         let normalizedCommitted = committedTail.map { normalize($0) }
@@ -64,6 +70,10 @@ enum TranscriptWindow {
             while start >= 0 {
                 if Array(normalizedWindow[start..<(start + anchorLength)]) == anchor {
                     let tailStart = start + anchorLength
+                    if anchorLength < trustedAnchorWords, !shortAnchorIsTrusted(tailStart) {
+                        start -= 1
+                        continue
+                    }
                     guard tailStart < window.count else { return "" }
                     return window[tailStart...].joined(separator: " ")
                 }
@@ -71,6 +81,49 @@ enum TranscriptWindow {
             }
         }
         return nil
+    }
+
+    /// Anchors at least this long are believed on their own.
+    nonisolated static var trustedAnchorWords: Int { 3 }
+
+    /// How many of the last `limit` words of `window` before `windowEnd` also appear among the last
+    /// words of `committedTail` before `committedEnd`, counted as a multiset.
+    ///
+    /// Shared words, not words at the same position: the recogniser inserts and splits words while
+    /// revising ("before we ship" → "before we go and ship", "gonna" → "going to"), which moves
+    /// every later word by a position. Compared position by position, such a revision looked like
+    /// a different sentence, and the whole utterance was emitted a second time (field log
+    /// 2026-09-15).
+    nonisolated static func boundaryOverlap(window: [String],
+                                            windowEnd: Int,
+                                            committedTail: [String],
+                                            committedEnd: Int,
+                                            limit: Int = 8) -> (compared: Int, shared: Int) {
+        guard windowEnd >= 0, windowEnd <= window.count,
+              committedEnd >= 0, committedEnd <= committedTail.count else { return (0, 0) }
+        let compared = min(limit, windowEnd, committedEnd)
+        guard compared > 0 else { return (0, 0) }
+
+        var pool: [String: Int] = [:]
+        for word in committedTail[(committedEnd - compared)..<committedEnd] {
+            pool[normalize(word), default: 0] += 1
+        }
+        var shared = 0
+        for word in window[(windowEnd - compared)..<windowEnd] {
+            let key = normalize(word)
+            if let available = pool[key], available > 0 {
+                pool[key] = available - 1
+                shared += 1
+            }
+        }
+        return (compared, shared)
+    }
+
+    /// Whether an overlap shows the SAME utterance: a revision keeps most words, a new utterance
+    /// shares a few function words at most. Too little to compare counts as a new utterance —
+    /// showing a few words twice can be lived with; skipping the new speaker's first words cannot.
+    nonisolated static func isSameUtterance(_ overlap: (compared: Int, shared: Int)) -> Bool {
+        overlap.compared >= 3 && overlap.shared * 3 >= overlap.compared * 2
     }
 
     /// Appends words to a tail, keeping at most `limit` of them.

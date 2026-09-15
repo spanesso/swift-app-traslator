@@ -155,6 +155,88 @@ final class SegmenterWordLossTests: XCTestCase {
                       "the new words must still arrive: \(phrases)")
     }
 
+    // MARK: - Change of speaker (field report 2026-09-15)
+
+    /// "When the woman starts talking after the man, her first words are lost — and the other way
+    /// round." The recogniser restarted its transcript for the new speaker, but not as an obvious
+    /// collapse (the previous utterance was short), so the segmenter kept counting positions in the
+    /// OLD utterance and skipped that many words of the NEW one.
+    func testNewSpeakersFirstWordsAreKeptAfterAShortUtterance() async {
+        let segmenter = makeSegmenter()
+        let (input, continuation) = AsyncStream.makeStream(of: SpeechSegment.self)
+        let sink = PhraseSink()
+        let reader = drain(await segmenter.processStream(input), into: sink)
+
+        continuation.yield(SpeechSegment(text: "okay let us go.", isFinal: false, confidence: 0.9))
+        await sleep(ms: 200)
+        // The recogniser's first partial for the new speaker already has more words than the
+        // previous utterance — a fast talker, or a partial delivered late.
+        for text in ["yes I think we should", "yes I think we should wait"] {
+            continuation.yield(SpeechSegment(text: text, isFinal: false, confidence: 0.9))
+            await sleep(ms: 150)
+        }
+        await sleep(ms: 1_500)
+
+        let phrases = await sink.phrases
+        reader.cancel()
+        continuation.finish()
+        XCTAssertTrue(phrases.joined(separator: " ").lowercased().contains("yes i think we should"),
+                      "the new speaker's first words were lost: \(phrases)")
+    }
+
+    /// The same turn, where the new utterance happens to contain a word the previous one ended
+    /// with. A one-word anchor matched it in the middle of the new speaker's sentence and
+    /// everything before it was treated as already committed.
+    func testCommonWordInTheNewUtteranceIsNotMistakenForTheCommittedBoundary() async {
+        let segmenter = makeSegmenter()
+        let (input, continuation) = AsyncStream.makeStream(of: SpeechSegment.self)
+        let sink = PhraseSink()
+        let reader = drain(await segmenter.processStream(input), into: sink)
+
+        continuation.yield(SpeechSegment(text: "okay let us go there.", isFinal: false, confidence: 0.9))
+        await sleep(ms: 200)
+        for text in ["yes I think there", "yes I think there is", "yes I think there is a problem"] {
+            continuation.yield(SpeechSegment(text: text, isFinal: false, confidence: 0.9))
+            await sleep(ms: 150)
+        }
+        await sleep(ms: 1_500)
+
+        let phrases = await sink.phrases
+        reader.cancel()
+        continuation.finish()
+        XCTAssertTrue(phrases.joined(separator: " ").lowercased().contains("yes i think there is"),
+                      "the new speaker's first words were lost: \(phrases)")
+    }
+
+    /// The opposite mistake, from the next field log: the recogniser revised the SAME utterance,
+    /// inserting a word earlier on ("before we go and ship"). Every later word moved one position,
+    /// a word-for-word comparison at fixed positions saw a different sentence, and the whole
+    /// utterance was emitted again as if a new speaker had said it.
+    func testRevisionThatShiftsWordsIsNotTakenForANewSpeaker() async {
+        let segmenter = makeSegmenter()
+        let (input, continuation) = AsyncStream.makeStream(of: SpeechSegment.self)
+        let sink = PhraseSink()
+        let reader = drain(await segmenter.processStream(input), into: sink)
+
+        continuation.yield(SpeechSegment(text: "we should update the library before we ship the new version.",
+                                         isFinal: false, confidence: 0.9))
+        await sleep(ms: 200)
+        for text in ["we should update the library before we go and ship the new versions",
+                     "we should update the library before we go and ship the new versions and then",
+                     "we should update the library before we go and ship the new versions and then test it"] {
+            continuation.yield(SpeechSegment(text: text, isFinal: false, confidence: 0.9))
+            await sleep(ms: 150)
+        }
+        await sleep(ms: 1_500)
+
+        let phrases = await sink.phrases
+        reader.cancel()
+        continuation.finish()
+        XCTAssertEqual(phrases.filter { $0.lowercased().contains("update the library") }.count, 1,
+                       "a revision was re-emitted as a new utterance: \(phrases)")
+        XCTAssertTrue(phrases.joined(separator: " ").contains("test it"), "the new words must still arrive: \(phrases)")
+    }
+
     // MARK: - D3: audio replayed into a new request must not be shown twice
 
     /// A rotation replays recent audio into the new request, so its first words repeat the end
