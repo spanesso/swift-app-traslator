@@ -66,6 +66,12 @@ struct TelemetryEvent: Sendable {
         /// Not an error and not a pause — it is the state where the app looks broken to the user
         /// and every other signal says everything is fine.
         case recognizerDeaf      = "RECOGNIZER_DEAF"
+        /// SpeechAnalyzer could not start; the classic recogniser was used instead.
+        case engineFallback      = "ENGINE_FALLBACK"
+        /// The on-device transcription model being downloaded to the device.
+        case speechModel         = "SPEECH_MODEL"
+        /// The app asked SpeechAnalyzer to finalise what it has heard so far.
+        case analyzerFinalize    = "ANALYZER_FINALIZE"
 
         // Audio continuity (FR-003)
         case audioGap            = "AUDIO_GAP"

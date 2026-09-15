@@ -46,6 +46,13 @@ final class SpeechRepository: SpeechRepositoryProtocol {
         AsyncStream { continuation in
             Task { [qualityMetrics] in
                 for await segment in stream {
+                    // A hypothesis is a guess the recogniser is expected to rewrite. Counting its
+                    // rewrites as revisions classified SpeechAnalyzer as low quality all meeting
+                    // and slowed every phrase down.
+                    guard !segment.isHypothesis else {
+                        continuation.yield(segment)
+                        continue
+                    }
                     await qualityMetrics.recordSegmentObservation(text: segment.text,
                                                                   isFinal: segment.isFinal,
                                                                   confidence: segment.confidence)

@@ -13,9 +13,10 @@ enum EnginePreference: String, Sendable, Codable, CaseIterable {
 
     // MARK: - UserDefaults persistence
 
-    private static let defaultsKey = "engine.preference"
+    private nonisolated static var defaultsKey: String { "engine.preference" }
 
-    static func fromUserDefaults() -> EnginePreference {
+    /// `nonisolated`: read by the engine selector, off the main actor, at every start.
+    nonisolated static func fromUserDefaults() -> EnginePreference {
         guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
               let pref = EnginePreference(rawValue: raw) else { return .auto }
         return pref
@@ -25,10 +26,14 @@ enum EnginePreference: String, Sendable, Codable, CaseIterable {
         UserDefaults.standard.set(rawValue, forKey: EnginePreference.defaultsKey)
     }
 
+    /// Whether this preference runs SpeechAnalyzer (when the device supports it). "Apple Only"
+    /// keeps the classic recogniser, as a way back and for comparison.
+    nonisolated var usesSpeechAnalyzer: Bool { self != .appleOnly }
+
     var displayName: String {
         switch self {
         case .auto: return "Auto (recommended)"
-        case .appleOnly: return "Apple Only (Lite)"
+        case .appleOnly: return "Classic recogniser"
         case .whisperPreferred: return "Enhanced Accuracy"
         }
     }

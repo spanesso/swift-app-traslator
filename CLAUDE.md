@@ -130,6 +130,8 @@ Hardened 2026-09-15: **nothing of a conversation leaves the app unless the user 
   grep '\[RECOGNIZER_DEAF\]'                        # rotated=true → the recogniser stopped
                                                     # listening; consecutive climbing → the mic
   grep '\[TAP_STALL\]'                              # must be EMPTY: no buffers reached the tap
+  grep '\[SESSION_START\]'                          # engine=appleSpeechAnalyzer on supported devices
+  grep '\[ENGINE_FALLBACK\]\|\[SPEECH_MODEL\]'      # why the classic recogniser was used; model download
   grep '\[RESTART_END\]'                            # carryMs = audio actually replayed (measured)
   grep '\[RESOURCES\]'                              # thermal=serious|critical, availMB falling
   ```
@@ -157,7 +159,7 @@ enum TranslatorState {
 - **Language pair is hardcoded** (`en-US → es-ES`); no language picker exists.
 - **UI tests** (`TranslatorAppUITests`) are scaffolding only. Real unit tests live in `TranslatorAppTests` (35 cases covering the reconciler, the formatter, session-state transitions and segmenter timing).
 - **The WhisperKit engine is withdrawn** (008 decision Q1). `EnginePreference.whisperPreferred` is retained as a stored value but resolves to the Apple route; `isAvailable` returns false and the UI shows it as unavailable. `WhisperKitEngine.swift` stays in the repo, unreferenced, pending a redesign (sliding window with overlap, stable-segment emission).
-- **`SpeechAnalyzer` is not used.** With a 26.1 deployment target it is available on every supported device and would remove session rotation entirely — making US6 and part of US2 unnecessary. Deliberately deferred; see `specs/008-fix-audio-pipeline-resilience/research.md` §R6.
+- **`SpeechAnalyzer` is the preferred engine (2026-09-15), pending device validation.** `SelectingSpeechEngine` starts `AppleSpeechAnalyzerEngine` (SpeechTranscriber, volatile results, model downloaded TO the device via `AssetInventory`) when `SpeechTranscriber.isAvailable` and the preference is not "Classic recogniser"; any failure to start falls back to `AppleSFSpeechEngine` (`ENGINE_FALLBACK`), except missing permissions and a stop during start. Both engines share the permanent tap: the classic one through `RecognitionRequestBox`, the analyser through `AudioBufferSink` → `AnalyzerAudioConverter`. `AnalyzerTranscriptAccumulator` turns final + volatile results into one growing string that never resets at a change of speaker, rolling over with a new generation only after a final past 300 words. The simulator has no SpeechTranscriber, so tests always exercise the fallback path plus the pure accumulator and selector.
 - **First-time translation model download** is surfaced as an error banner; the user must open Settings manually.
 
 ## Active Technologies

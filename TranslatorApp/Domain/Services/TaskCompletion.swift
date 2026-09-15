@@ -9,33 +9,45 @@
 //  "finish, then wait for the consumers to drain", and this is the wait: long enough for the last
 //  words to arrive, never long enough to hang a stop.
 //
+//  NEVER LONGER THAN THE BOUND (field log 2026-09-15). The first version raced the task inside a
+//  task group, cancelled it on timeout and then — because a group waits for all its children —
+//  waited for it anyway. A task that ignores cancellation, like SpeechAnalyzer's finalisation,
+//  turned the bounded wait into an unbounded one. Now two watchers race to resume one
+//  continuation, and whichever loses simply finishes later on its own.
+//
 
 import Foundation
+import os
 
 enum TaskCompletion {
 
     /// Waits for `task` to complete. If it has not completed after `milliseconds`, it is
-    /// cancelled.
+    /// cancelled and the wait returns anyway.
     ///
     /// - Returns: true when the task finished by itself.
     @discardableResult
     nonisolated static func wait(for task: Task<Void, Never>?, upToMs milliseconds: Int) async -> Bool {
         guard let task else { return true }
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
+        let resumed = OSAllocatedUnfairLock(initialState: false)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            Task {
                 await task.value
-                return true
+                let first = resumed.withLock { done -> Bool in
+                    defer { done = true }
+                    return !done
+                }
+                if first { continuation.resume(returning: true) }
             }
-            group.addTask {
+            Task {
                 try? await Task.sleep(nanoseconds: UInt64(max(milliseconds, 0)) * 1_000_000)
-                return false
+                let first = resumed.withLock { done -> Bool in
+                    defer { done = true }
+                    return !done
+                }
+                guard first else { return }
+                task.cancel()
+                continuation.resume(returning: false)
             }
-            let finishedFirst = await group.next() ?? false
-            // Cancel the task itself BEFORE leaving the group: the group waits for every child,
-            // and the one awaiting `task.value` only returns once the task has ended.
-            if !finishedFirst { task.cancel() }
-            group.cancelAll()
-            return finishedFirst
         }
     }
 }

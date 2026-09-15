@@ -64,10 +64,12 @@ final class DependencyContainer {
         audioSessionCoordinator = sessionCoordinator
         let monitor = AudioLevelMonitor()
         levelMonitor = monitor
+        let bufferSink = AudioBufferSink()
         let capture = AudioCaptureSession(telemetry: sink,
                                           requestBox: requestBox,
                                           ringBuffer: ringBuffer,
-                                          levelMonitor: monitor)
+                                          levelMonitor: monitor,
+                                          bufferSink: bufferSink)
         audioCapture = capture
 
         // MARK: Engine selection (008 decision Q1)
@@ -80,12 +82,30 @@ final class DependencyContainer {
         if !preference.isAvailable {
             logger.notice("[Container] preference=\(preference.rawValue, privacy: .public) is withdrawn in this build; using the Apple route")
         }
-        let engine = AppleSFSpeechEngine(telemetry: sink,
-                                         capture: capture,
-                                         requestBox: requestBox,
-                                         ringBuffer: ringBuffer,
-                                         sessionCoordinator: sessionCoordinator,
-                                         levelMonitor: monitor)
+        let classicEngine = AppleSFSpeechEngine(telemetry: sink,
+                                                capture: capture,
+                                                requestBox: requestBox,
+                                                ringBuffer: ringBuffer,
+                                                sessionCoordinator: sessionCoordinator,
+                                                levelMonitor: monitor)
+        // SpeechAnalyzer migration (2026-09-15): preferred whenever the device supports it and
+        // the user has not chosen the classic recogniser; the classic engine takes over if it
+        // cannot start, so recording never depends on it.
+        let analyzerEngine = AppleSpeechAnalyzerEngine(telemetry: sink,
+                                                       capture: capture,
+                                                       sessionCoordinator: sessionCoordinator,
+                                                       audioSink: bufferSink,
+                                                       levelMonitor: monitor)
+        let engine = SelectingSpeechEngine(
+            preferred: analyzerEngine,
+            preferredId: .appleSpeechAnalyzer,
+            fallback: classicEngine,
+            fallbackId: .legacyAppleSFSpeech,
+            usePreferred: {
+                EnginePreference.fromUserDefaults().usesSpeechAnalyzer
+                    && AppleSpeechAnalyzerEngine.isSupportedOnThisDevice
+            },
+            telemetry: sink)
         speechEngine = engine
         // Canonical, unambiguous engine-selection line for on-device diagnostics.
         logger.info("[Container] engine=\(engine.engineId.rawValue, privacy: .public)")

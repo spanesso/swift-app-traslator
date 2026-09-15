@@ -31,6 +31,8 @@ actor AudioCaptureSession {
     private let requestBox: RecognitionRequestBox
     let ringBuffer: AudioRingBuffer
     private let levelMonitor: AudioLevelMonitor
+    /// Second consumer of the tap: SpeechAnalyzer's input. Empty while the classic engine runs.
+    private let bufferSink: AudioBufferSink
 
     /// A `var`: after a media services reset every audio object built before it is dead, and a tap
     /// re-installed on the old engine can "start" without a single buffer ever arriving
@@ -70,11 +72,13 @@ actor AudioCaptureSession {
     init(telemetry: any PipelineTelemetryProtocol,
          requestBox: RecognitionRequestBox,
          ringBuffer: AudioRingBuffer,
-         levelMonitor: AudioLevelMonitor) {
+         levelMonitor: AudioLevelMonitor,
+         bufferSink: AudioBufferSink) {
         self.telemetry = telemetry
         self.requestBox = requestBox
         self.ringBuffer = ringBuffer
         self.levelMonitor = levelMonitor
+        self.bufferSink = bufferSink
     }
 
     // MARK: - Lifecycle
@@ -161,6 +165,7 @@ actor AudioCaptureSession {
         let box = requestBox
         let ring = ringBuffer
         let level = levelMonitor
+        let analyzerFeed = bufferSink
         let stats = tapStats
         let sink = telemetry
         let sid = sessionId
@@ -168,6 +173,7 @@ actor AudioCaptureSession {
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, when in
             // Audio thread. No allocation, no await, no logging on the fast path.
             box.append(buffer, recordingInto: ring)
+            analyzerFeed.deliver(buffer)
 
             // Input level, so a speaker the recogniser cannot hear stops being invisible.
             // Arithmetic only — no allocation on the render thread.
