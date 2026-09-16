@@ -237,6 +237,37 @@ final class SegmenterWordLossTests: XCTestCase {
         XCTAssertTrue(phrases.joined(separator: " ").contains("test it"), "the new words must still arrive: \(phrases)")
     }
 
+    // MARK: - Short reply swallowed by the next speaker (field export, 2026-09-16)
+
+    /// "Good." answered "Hi guys, how are you?" and the next speaker started a completely
+    /// unrelated sentence right after, in the SAME recogniser generation (no signalled restart,
+    /// and the anchor to "hi guys how are you" is still trusted, so neither restart detector
+    /// fires). "good" is not on the standalone-reply whitelist, so the sentence-split path
+    /// refuses to emit it alone (the shredding guard) and it is glued onto the next speaker's
+    /// entire sentence instead — exported as one line, "Good. Different different things in
+    /// front of the window.", instead of two.
+    func testShortReplyBeforeAnUnrelatedNewSentenceIsNotGlued() async {
+        let segmenter = makeSegmenter()
+        let (input, continuation) = AsyncStream.makeStream(of: SpeechSegment.self)
+        let sink = PhraseSink()
+        let reader = drain(await segmenter.processStream(input), into: sink)
+
+        continuation.yield(SpeechSegment(text: "hi guys how are you", isFinal: false, confidence: 0.9))
+        await sleep(ms: 1_500)
+        continuation.yield(SpeechSegment(text: "hi guys how are you good.", isFinal: false, confidence: 0.9))
+        await sleep(ms: 200)
+        continuation.yield(SpeechSegment(
+            text: "hi guys how are you good. different different things in front of the window",
+            isFinal: false, confidence: 0.9))
+        await sleep(ms: 1_500)
+
+        let phrases = await sink.phrases
+        reader.cancel()
+        continuation.finish()
+        XCTAssertTrue(phrases.contains { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() == "good" },
+                      "the short reply was glued onto the next speaker's sentence instead of standing alone: \(phrases)")
+    }
+
     // MARK: - D3: audio replayed into a new request must not be shown twice
 
     /// A rotation replays recent audio into the new request, so its first words repeat the end

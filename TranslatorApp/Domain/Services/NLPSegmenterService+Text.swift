@@ -158,8 +158,15 @@ extension NLPSegmenterService {
     }
 
     private nonisolated static var standaloneUtterances: Set<String> {
+        // Extended 2026-09-16 (field export): "good" answered "how are you?" and, not being on
+        // this list, was glued onto the next speaker's unrelated sentence instead of standing on
+        // its own — the anchor to the prior commit was still trusted, so neither restart detector
+        // caught the speaker change either. Added the other common one-word acknowledgements this
+        // guard was already meant to cover.
         ["yes", "yeah", "yep", "no", "nope", "okay", "ok", "right", "sure",
-         "exactly", "correct", "thanks", "hello", "hi", "bye", "sorry", "please"]
+         "exactly", "correct", "thanks", "hello", "hi", "bye", "sorry", "please",
+         "good", "nice", "cool", "great", "fine", "true", "perfect", "understood",
+         "agreed", "definitely", "absolutely"]
     }
 
     func splitIntoSentences(_ text: String) -> [String] {
